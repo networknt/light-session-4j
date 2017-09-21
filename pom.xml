@@ -75,12 +75,13 @@
         <version.undertow>1.4.19.Final</version.undertow>
         <version.hamcrest>1.3</version.hamcrest>
         <version.assertj>2.1.0</version.assertj>
+        <version.hazelcast>3.6.7</version.hazelcast>
         <version.snakeyaml>1.18</version.snakeyaml>
         <argLine>-Xmx512m -XX:MaxPermSize=256m</argLine>
     </properties>
 
     <modules>
-        <module>session-handler</module>
+        <module>session-core</module>
         <module>hazelcast-manager</module>
         <module>redis-manager</module>
         <module>jdbc-manager</module>
@@ -91,7 +92,7 @@
             <!-- Modules in this project -->
             <dependency>
                 <groupId>com.networknt</groupId>
-                <artifactId>session-handler</artifactId>
+                <artifactId>session-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -182,6 +183,11 @@
                 <artifactId>hamcrest-library</artifactId>
                 <version>${version.hamcrest}</version>
                 <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.hazelcast</groupId>
+                <artifactId>hazelcast</artifactId>
+                <version>${version.hazelcast}</version>
             </dependency>
             <dependency>
                 <groupId>org.assertj</groupId>
