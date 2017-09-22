@@ -37,15 +37,7 @@ public interface SessionRepository<S extends Session> {
 	 */
 	void save(S session);
 
-	/**
-	 * Gets the {@link Session} by the {@link Session#getId()} or null if no
-	 * {@link Session} is found.
-	 *
-	 * @param id the to lookup
-	 * @return the {@link Session} by the {@link Session#getId()} or null if no
-	 * {@link Session} is found.
-	 */
-	S findById(String id);
+
 
 	/**
 	 * Deletes the {@link Session} with the given {@link Session#getId()} or does nothing
@@ -53,4 +45,7 @@ public interface SessionRepository<S extends Session> {
 	 * @param id the  to delete
 	 */
 	void deleteById(String id);
+
+
+
 }
