@@ -1,6 +1,5 @@
 package com.networknt.session.hazelcase;
 
-import com.networknt.session.MapSession;
 
 import com.networknt.session.SessionImpl;
 import io.undertow.UndertowMessages;
@@ -11,7 +10,7 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * A custom implementation of {@link Session} that uses a {@link MapSession} as the
+ * A custom implementation of {@link Session} that uses a {@link SessionImpl} as the
  * basis for its mapping. It keeps track if changes have been made since last save.
  *
  */
@@ -49,8 +48,8 @@ public class HazelcastSession implements Session {
     }
 
     /**
-     * Creates a new instance from the provided {@link MapSession}.
-     * @param cached the {@link MapSession} that represents the persisted session that
+     * Creates a new instance from the provided {@link SessionImpl}.
+     * @param cached the {@link SessionImpl} that represents the persisted session that
      * was retrieved. Cannot be {@code null}.
      */
     public HazelcastSession(SessionImpl cached, HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {

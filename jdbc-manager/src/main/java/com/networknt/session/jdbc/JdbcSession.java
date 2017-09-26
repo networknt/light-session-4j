@@ -32,6 +32,13 @@ public class JdbcSession implements Session {
             this.isNew = true;
     }
 
+    JdbcSession(JdbcSessionManager jdbcSessionManager,  SessionConfig sessionCookieConfig, String sessionId) {
+        this.jdbcSessionManager = jdbcSessionManager;
+        this.sessionCookieConfig = sessionCookieConfig;
+        this.delegate = new SessionImpl(jdbcSessionManager, sessionId, jdbcSessionManager.getDefaultMaxInactiveInterval());
+        this.isNew = true;
+    }
+
     JdbcSession(SessionImpl delegate,  SessionConfig sessionCookieConfig) {
             //this.primaryKey = primaryKey;
             this.delegate = delegate;

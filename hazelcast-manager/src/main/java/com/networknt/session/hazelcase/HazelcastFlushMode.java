@@ -19,7 +19,7 @@ public enum HazelcastFlushMode {
 
 	/**
 	 * Writes to Hazelcast as soon as possible. For example
-	 * {@link SessionRepository#createSession()} will write the session to Hazelcast.
+	 * {createSession()} will write the session to Hazelcast.
 	 * Another example is that setting an attribute on the session will also write to
 	 * Hazelcast immediately.
 	 */

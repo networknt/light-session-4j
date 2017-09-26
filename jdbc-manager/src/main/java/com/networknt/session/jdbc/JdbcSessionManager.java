@@ -4,9 +4,11 @@ package com.networknt.session.jdbc;
 import com.networknt.session.FindByIndexNameSessionRepository;
 import com.networknt.session.SessionImpl;
 import com.networknt.session.SessionRepository;
+import com.networknt.session.SessionStatistics;
 import com.networknt.session.jdbc.serializer.SerializationFailedException;
 import com.networknt.session.jdbc.serializer.ValueBytesConverter;
 import io.undertow.UndertowLogger;
+import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.session.*;
 import io.undertow.util.AttachmentKey;
@@ -139,18 +141,12 @@ public class JdbcSessionManager implements
 	private String deleteSessionsByExpiryTimeQuery;
 	private final SessionListeners sessionListeners = new SessionListeners();
 
-	private Integer defaultMaxInactiveInterval;
+	private Integer defaultMaxInactiveInterval = 30 * 60;
 	private SessionConfig config;
 
 	private final String deploymentName;
-	private volatile int defaultSessionTimeout = 30 * 60;
-	private final AtomicLong createdSessionCount = new AtomicLong();
-	private final AtomicLong rejectedSessionCount = new AtomicLong();
-	private volatile long longestSessionLifetime = 0;
-	private volatile long expiredSessionCount = 0;
-	private volatile BigInteger totalSessionLifetime = BigInteger.ZERO;
-	private final AtomicInteger highestSessionCount = new AtomicInteger();
-	private final boolean statisticsEnabled;
+	private final SessionStatistics sessionStatistics = null;
+	private boolean statisticsEnabled = false;
 
 	private volatile long startTime;
 	private ValueBytesConverter converter = new ValueBytesConverter();
@@ -162,15 +158,17 @@ public class JdbcSessionManager implements
 	}
 
 	public JdbcSessionManager(DataSource dataSource, SessionConfig config) {
-		this(dataSource, config, DEPLOY_NAME, true);
+		this(dataSource, config, DEPLOY_NAME, null);
 	}
 
-	public JdbcSessionManager(DataSource dataSource, SessionConfig config, String deploymentName,  boolean statisticsEnabled) {
+	public JdbcSessionManager(DataSource dataSource, SessionConfig config, String deploymentName,  SessionStatistics sessionStatistics) {
 		this.dataSource = dataSource;
 		converter = new ValueBytesConverter();
 		this.config = config;
 		this.deploymentName = deploymentName;
-		this.statisticsEnabled = statisticsEnabled;
+		if (sessionStatistics!=null) {
+			this.statisticsEnabled = true;
+		}
 		prepareQueries();
 	}
 
@@ -193,8 +191,47 @@ public class JdbcSessionManager implements
 
 	@Override
 	public Session createSession(final HttpServerExchange serverExchange, final SessionConfig config) {
-		return null;
+		if (config == null) {
+			throw UndertowMessages.MESSAGES.couldNotFindSessionCookieConfig();
+		}
+		String sessionID = config.findSessionId(serverExchange);
+		if (sessionID == null) {
+			int count = 0;
+			SecureRandomSessionIdGenerator sessionIdGenerator = new SecureRandomSessionIdGenerator();
+			sessionID = sessionIdGenerator.createSessionId();
+		}
+
+		JdbcSession session = new JdbcSession(this, getConfig(), sessionID);
+
+		UndertowLogger.SESSION_LOGGER.debugf("Created session with id %s for exchange %s", sessionID, serverExchange);
+
+		config.setSessionId(serverExchange, session.getId());
+		session.setLastAccessedTime(System.currentTimeMillis());
+
+		sessionListeners.sessionCreated(session, serverExchange);
+		serverExchange.putAttachment(NEW_SESSION, session);
+
+		if(statisticsEnabled) {
+			sessionStatistics.setCreatedSessionCount(sessionStatistics.getCreatedSessionCount()+1);
+			long highest;
+			int sessionSize;
+			highest = sessionStatistics.getHighestSessionCount();
+			if (highest<=getSessions().size()) {
+				sessionStatistics.setHighestSessionCount(getSessions().size());
+			}
+		}
+		return session;
+
 	}
+
+	public SessionListeners getSessionListeners() {
+		return sessionListeners;
+	}
+
+	public Map<String, SessionImpl> getSessions() {
+		return new HashMap<String, SessionImpl>();
+	}
+
 
 	public void save(JdbcSession session) {
 		if (session.isNew()) {
@@ -282,7 +319,18 @@ public class JdbcSessionManager implements
 
 	@Override
 	public Session getSession(final HttpServerExchange serverExchange, final SessionConfig config) {
-		return null;
+		if (serverExchange != null) {
+			JdbcSession newSession = serverExchange.getAttachment(NEW_SESSION);
+			if(newSession != null) {
+				return newSession;
+			}
+		}
+		String sessionId = config.findSessionId(serverExchange);
+		JdbcSession session =  getSession(sessionId);
+		if(session != null) {
+			session.getDelegate().requestStarted(serverExchange);
+		}
+		return session;
 	}
 
 	@Override
@@ -318,6 +366,7 @@ public class JdbcSessionManager implements
 		return null;
 	}
 
+	@Override
 	public void deleteById(final String id) {
 		try (final Connection connection = dataSource.getConnection()) {
 			try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionQuery)) {
@@ -404,11 +453,9 @@ public class JdbcSessionManager implements
 
 	@Override
 	public void start() {
-		createdSessionCount.set(0);
-		expiredSessionCount = 0;
-		rejectedSessionCount.set(0);
-		totalSessionLifetime = BigInteger.ZERO;
-		startTime = System.currentTimeMillis();
+		if (sessionStatistics!=null && sessionStatistics.getStartTime()<=0) {
+			sessionStatistics.setStartTime(System.currentTimeMillis());
+		}
 	}
 
 	@Override

@@ -2,8 +2,8 @@
 
 package com.networknt.session.hazelcase;
 
-import com.hazelcast.core.EntryEvent;
-import com.hazelcast.core.IMap;
+import com.hazelcast.concurrent.atomiclong.AtomicLongProxy;
+import com.hazelcast.core.*;
 import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryEvictedListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
@@ -11,6 +11,7 @@ import com.hazelcast.query.Predicates;
 import com.networknt.session.FindByIndexNameSessionRepository;
 import com.networknt.session.SessionImpl;
 import com.networknt.session.SessionRepository;
+import com.networknt.session.SessionStatistics;
 import io.undertow.UndertowLogger;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
@@ -51,7 +52,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  */
 public class HazelcastSessionManager implements
-		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager, SessionManagerStatistics,
+		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager,
 		EntryAddedListener<String, Session>,
 		EntryEvictedListener<String, Session>,
 		EntryRemovedListener<String, Session> {
@@ -67,22 +68,16 @@ public class HazelcastSessionManager implements
 	private static final Logger logger = LoggerFactory.getLogger(HazelcastSessionManager.class);
 
 	private final IMap<String, SessionImpl> sessions;
+	private final SessionStatistics sessionStatistics = null;
 	private final SessionListeners sessionListeners = new SessionListeners();
 
 
 	private HazelcastFlushMode hazelcastFlushMode = HazelcastFlushMode.ON_SAVE;
 	private final String deploymentName;
 	private volatile int defaultSessionTimeout = 30 * 60;
-	private final AtomicLong createdSessionCount = new AtomicLong();
-	private final AtomicLong rejectedSessionCount = new AtomicLong();
-	private volatile long longestSessionLifetime = 0;
-	private volatile long expiredSessionCount = 0;
-	private volatile BigInteger totalSessionLifetime = BigInteger.ZERO;
-	private final AtomicInteger highestSessionCount = new AtomicInteger();
-	private final int maxSize;
-	private final boolean statisticsEnabled;
 
-	private volatile long startTime;
+	private final int maxSize;
+	private boolean statisticsEnabled = false;
 
 
 	private String sessionListenerId;
@@ -99,15 +94,17 @@ public class HazelcastSessionManager implements
 
 
 	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions) {
-		this(sessions, deploymentName, maxSessions,  true);
+		this(sessions, deploymentName, maxSessions,  null);
 	}
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions, boolean statisticsEnabled) {
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions, SessionStatistics sessionStatistics) {
 		Objects.requireNonNull(sessions);
 		this.sessions = sessions;
 		this.deploymentName = deploymentName;
 		this.maxSize = maxSessions;
-		this.statisticsEnabled = statisticsEnabled;
+		if (sessionStatistics!=null) {
+			this.statisticsEnabled = true;
+		}
 	}
 
 	@Override
@@ -117,11 +114,9 @@ public class HazelcastSessionManager implements
 
 	@Override
 	public void start() {
-		createdSessionCount.set(0);
-		expiredSessionCount = 0;
-		rejectedSessionCount.set(0);
-		totalSessionLifetime = BigInteger.ZERO;
-		startTime = System.currentTimeMillis();
+		if (sessionStatistics!=null && sessionStatistics.getStartTime()<=0) {
+			sessionStatistics.setStartTime(System.currentTimeMillis());
+		}
 	}
 
 	@Override
@@ -158,17 +153,10 @@ public class HazelcastSessionManager implements
 	}
 
 	@Override
-	public HazelcastSession createSession() {
-		HazelcastSession session = new HazelcastSession(this);
-
-		return session;
-	}
-
-	@Override
 	public Session createSession(final HttpServerExchange serverExchange, final SessionConfig config) {
 		if(maxSize>0 && sessions.size() >= maxSize) {
 			if(statisticsEnabled) {
-				rejectedSessionCount.incrementAndGet();
+				sessionStatistics.setRejectedSessionCount(sessionStatistics.getRejectedSessionCount()+1);
 			}
 			throw UndertowMessages.MESSAGES.tooManySessions(maxSize);
 		}
@@ -203,16 +191,13 @@ public class HazelcastSessionManager implements
 		serverExchange.putAttachment(NEW_SESSION, session);
 
 		if(statisticsEnabled) {
-			createdSessionCount.incrementAndGet();
-			int highest;
+			sessionStatistics.setCreatedSessionCount(sessionStatistics.getCreatedSessionCount()+1);
+			long highest;
 			int sessionSize;
-			do {
-				highest = highestSessionCount.get();
-				sessionSize = sessions.size();
-				if(sessionSize <= highest) {
-					break;
-				}
-			} while (!highestSessionCount.compareAndSet(highest, sessionSize));
+			highest = sessionStatistics.getHighestSessionCount();
+			if (highest<=sessions.size()) {
+				sessionStatistics.setHighestSessionCount(sessions.size());
+			}
 		}
 		return session;
 
@@ -338,10 +323,11 @@ public class HazelcastSessionManager implements
 	public void updateStatistics(HazelcastSession session) {
 		long life = System.currentTimeMillis() - session.getCreationTime();
 		synchronized (this) {
-			expiredSessionCount++;
-			totalSessionLifetime = totalSessionLifetime.add(BigInteger.valueOf(life));
-			if(longestSessionLifetime < life) {
-				longestSessionLifetime = life;
+			sessionStatistics.setExpiredSessionCount(sessionStatistics.getExpiredSessionCount()+1);
+			sessionStatistics.setTotalSessionLifetime(sessionStatistics.getTotalSessionLifetime().add(BigInteger.valueOf(life)));
+
+			if(sessionStatistics.getLongestSessionLifetime() < life) {
+				sessionStatistics.setLongestSessionLifetime(life);
 			}
 		}
 
@@ -382,54 +368,9 @@ public class HazelcastSessionManager implements
 
 	@Override
 	public SessionManagerStatistics getStatistics() {
-		return this;
+		return null;
 	}
 
-	public long getCreatedSessionCount() {
-		return createdSessionCount.get();
-	}
 
-	@Override
-	public long getMaxActiveSessions() {
-		return maxSize;
-	}
 
-	public long getHighestSessionCount() {
-		return highestSessionCount.get();
-	}
-
-	@Override
-	public long getActiveSessionCount() {
-		return sessions.size();
-	}
-
-	@Override
-	public long getExpiredSessionCount() {
-		return expiredSessionCount;
-	}
-
-	@Override
-	public long getRejectedSessions() {
-		return rejectedSessionCount.get();
-
-	}
-
-	@Override
-	public long getMaxSessionAliveTime() {
-		return longestSessionLifetime;
-	}
-
-	@Override
-	public synchronized long getAverageSessionAliveTime() {
-		//this method needs to be synchronised to make sure the session count and the total are in sync
-		if(expiredSessionCount == 0) {
-			return 0;
-		}
-		return new BigDecimal(totalSessionLifetime).divide(BigDecimal.valueOf(expiredSessionCount), MathContext.DECIMAL128).longValue();
-	}
-
-	@Override
-	public long getStartTime() {
-		return startTime;
-	}
 }

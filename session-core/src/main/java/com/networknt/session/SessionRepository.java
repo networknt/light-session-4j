@@ -10,20 +10,6 @@ import io.undertow.server.session.Session;
  */
 public interface SessionRepository<S extends Session> {
 
-	/**
-	 * Creates a new {@link Session} that is capable of being persisted by this
-	 * {@link SessionRepository}.
-	 *
-	 * <p>
-	 * This allows optimizations and customizations in how the {@link Session} is
-	 * persisted. For example, the implementation returned might keep track of the changes
-	 * ensuring that only the delta needs to be persisted on a save.
-	 * </p>
-	 *
-	 * @return a new {@link Session} that is capable of being persisted by this
-	 * {@link SessionRepository}
-	 */
-	S createSession();
 
 	/**
 	 * Ensures the {@link Session} created by*
