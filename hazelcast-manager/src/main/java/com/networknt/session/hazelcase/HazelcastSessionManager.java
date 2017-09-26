@@ -1,20 +1,6 @@
 
 
-package com.networknt.session.data.hazelcast;
-
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.math.MathContext;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-
-
-import com.networknt.session.*;
+package com.networknt.session.hazelcase;
 
 import com.hazelcast.core.EntryEvent;
 import com.hazelcast.core.IMap;
@@ -22,12 +8,9 @@ import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryEvictedListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
 import com.hazelcast.query.Predicates;
-
-
-
+import com.networknt.session.FindByIndexNameSessionRepository;
+import com.networknt.session.SessionImpl;
 import com.networknt.session.SessionRepository;
-import com.networknt.session.data.HazelcastFlushMode;
-import com.networknt.session.data.HazelcastSession;
 import io.undertow.UndertowLogger;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
@@ -35,6 +18,16 @@ import io.undertow.server.session.*;
 import io.undertow.util.AttachmentKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.MathContext;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A {@link SessionRepository} implementation that stores
@@ -52,12 +45,12 @@ import org.slf4j.LoggerFactory;
  * IMap{@code <String, MapSession>} sessions = hazelcastInstance
  *         .getMap("light-session:sessions");
  *
- * HazelcastSessionRepository sessionRepository =
- *         new HazelcastSessionRepository(sessions);
+ * HazelcastSessionManager sessionRepository =
+ *         new HazelcastSessionManager(sessions);
  * </pre>
  *
  */
-public class HazelcastSessionRepository implements
+public class HazelcastSessionManager implements
 		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager, SessionManagerStatistics,
 		EntryAddedListener<String, Session>,
 		EntryEvictedListener<String, Session>,
@@ -71,7 +64,7 @@ public class HazelcastSessionRepository implements
 
 	public static final String DEPLOY_NAME = "LIGHT-SESSION";
 
-	private static final Logger logger = LoggerFactory.getLogger(HazelcastSessionRepository.class);
+	private static final Logger logger = LoggerFactory.getLogger(HazelcastSessionManager.class);
 
 	private final IMap<String, SessionImpl> sessions;
 	private final SessionListeners sessionListeners = new SessionListeners();
@@ -94,22 +87,22 @@ public class HazelcastSessionRepository implements
 
 	private String sessionListenerId;
 
-	public HazelcastSessionRepository(IMap<String, SessionImpl> sessions) {
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions) {
 	//	Objects.requireNonNull(sessions);
 		this(sessions, DEPLOY_NAME);
 	}
 
-	public HazelcastSessionRepository(IMap<String, SessionImpl> sessions, String id) {
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String id) {
 		this(sessions, id, -1);
 	}
 
 
 
-	public HazelcastSessionRepository(IMap<String, SessionImpl> sessions,String deploymentName, int maxSessions) {
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions) {
 		this(sessions, deploymentName, maxSessions,  true);
 	}
 
-	public HazelcastSessionRepository(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions,  boolean statisticsEnabled) {
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions, boolean statisticsEnabled) {
 		Objects.requireNonNull(sessions);
 		this.sessions = sessions;
 		this.deploymentName = deploymentName;

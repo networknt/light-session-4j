@@ -1,0 +1,546 @@
+
+package com.networknt.session.jdbc;
+
+import com.networknt.session.FindByIndexNameSessionRepository;
+import com.networknt.session.SessionImpl;
+import com.networknt.session.SessionRepository;
+import com.networknt.session.jdbc.serializer.SerializationFailedException;
+import com.networknt.session.jdbc.serializer.ValueBytesConverter;
+import io.undertow.UndertowLogger;
+import io.undertow.server.HttpServerExchange;
+import io.undertow.server.session.*;
+import io.undertow.util.AttachmentKey;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.sql.DataSource;
+import java.io.ByteArrayInputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.MathContext;
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * A {@link SessionRepository} implementation that uses
+ * Database to store sessions in a relational database. This
+ * implementation does not support publishing of session events.
+ * <p>
+ * An example of how to create a new instance can be seen below:
+ *
+ * <pre class="code">
+ * JdbcTemplate jdbcTemplate = new JdbcTemplate();
+ *
+ * // ... configure jdbcTemplate ...
+ *
+ * PlatformTransactionManager transactionManager = new DataSourceTransactionManager();
+ *
+ * // ... configure transactionManager ...
+ *
+ * JdbcSessionManager sessionRepository =
+ *         new JdbcSessionManager(jdbcTemplate, transactionManager);
+ * </pre>
+ *
+ *
+ * Depending on your database, the table definition can be described as below:
+ *
+ * <pre class="code">
+ * CREATE TABLE SPRING_SESSION (
+ *   PRIMARY_ID CHAR(36) NOT NULL,
+ *   SESSION_ID CHAR(36) NOT NULL,
+ *   CREATION_TIME BIGINT NOT NULL,
+ *   LAST_ACCESS_TIME BIGINT NOT NULL,
+ *   MAX_INACTIVE_INTERVAL INT NOT NULL,
+ *   EXPIRY_TIME BIGINT NOT NULL,
+ *   PRINCIPAL_NAME VARCHAR(100),
+ *   CONSTRAINT SPRING_SESSION_PK PRIMARY KEY (PRIMARY_ID)
+ * );
+ *
+ * CREATE INDEX SPRING_SESSION_IX1 ON SPRING_SESSION (SESSION_ID);
+ * CREATE INDEX SPRING_SESSION_IX1 ON SPRING_SESSION (EXPIRY_TIME);
+ *
+ * CREATE TABLE SPRING_SESSION_ATTRIBUTES (
+ *  SESSION_PRIMARY_ID CHAR(36) NOT NULL,
+ *  ATTRIBUTE_NAME VARCHAR(200) NOT NULL,
+ *  ATTRIBUTE_BYTES BYTEA NOT NULL,
+ *  CONSTRAINT SPRING_SESSION_ATTRIBUTES_PK PRIMARY KEY (SESSION_PRIMARY_ID, ATTRIBUTE_NAME),
+ *  CONSTRAINT SPRING_SESSION_ATTRIBUTES_FK FOREIGN KEY (SESSION_PRIMARY_ID) REFERENCES SPRING_SESSION(PRIMARY_ID) ON DELETE CASCADE
+ * );
+ *
+ * CREATE INDEX SPRING_SESSION_ATTRIBUTES_IX1 ON SPRING_SESSION_ATTRIBUTES (SESSION_PRIMARY_ID);
+ * </pre>
+ */
+public class JdbcSessionManager implements
+		FindByIndexNameSessionRepository<JdbcSession>, SessionManager{
+
+
+	public final AttachmentKey<JdbcSession> NEW_SESSION = AttachmentKey.create(JdbcSession.class);
+	public static final String DEPLOY_NAME = "LIGHT-SESSION";
+
+
+	private static final String SECURITY_CONTEXT = "SECURITY_CONTEXT";
+
+	private static final String CREATE_SESSION_QUERY =
+			"INSERT INTO light_session(SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME) " +
+					"VALUES (?, ?, ?, ?, ?, ?)";
+
+	private static final String CREATE_SESSION_ATTRIBUTE_QUERY =
+			"INSERT INTO light_session_attributes(SESSION_ID, ATTRIBUTE_NAME, ATTRIBUTE_BYTES) " +
+					"VALUES (?, ?, ?)";
+
+	private static final String GET_SESSION_QUERY =
+			"SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
+					"FROM light_session S " +
+					"LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
+					"WHERE S.SESSION_ID = ?";
+
+	private static final String UPDATE_SESSION_QUERY =
+			"UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
+					"WHERE SESSION_ID = ?";
+
+	private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
+			"UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
+					"WHERE SESSION_ID = ? " +
+					"AND ATTRIBUTE_NAME = ?";
+
+	private static final String DELETE_SESSION_ATTRIBUTE_QUERY =
+			"DELETE FROM light_session_attributes " +
+					"WHERE SESSION_ID = ? " +
+					"AND ATTRIBUTE_NAME = ?";
+
+	private static final String DELETE_SESSION_QUERY =
+			"DELETE FROM light_session " +
+					"WHERE SESSION_ID = ?";
+
+	private static final String LIST_SESSIONS_BY_PRINCIPAL_NAME_QUERY =
+			"SELECT S.PRIMARY_ID, S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
+					"FROM light_session S " +
+					"LEFT OUTER JOIN light_session_attributes SA ON S.PRIMARY_ID = SA.SESSION_PRIMARY_ID " +
+					"WHERE S.PRINCIPAL_NAME = ?";
+
+	private static final String DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY =
+			"DELETE FROM light_session " +
+					"WHERE EXPIRY_TIME < ?";
+
+	private static final Logger logger = LoggerFactory.getLogger(JdbcSessionManager.class);
+
+	private String createSessionQuery;
+	private String createSessionAttributeQuery;
+	private String getSessionQuery;
+	private String updateSessionQuery;
+	private String updateSessionAttributeQuery;
+	private String deleteSessionAttributeQuery;
+	private String deleteSessionQuery;
+	private String listSessionsByPrincipalNameQuery;
+	private String deleteSessionsByExpiryTimeQuery;
+	private final SessionListeners sessionListeners = new SessionListeners();
+
+	private Integer defaultMaxInactiveInterval;
+	private SessionConfig config;
+
+	private final String deploymentName;
+	private volatile int defaultSessionTimeout = 30 * 60;
+	private final AtomicLong createdSessionCount = new AtomicLong();
+	private final AtomicLong rejectedSessionCount = new AtomicLong();
+	private volatile long longestSessionLifetime = 0;
+	private volatile long expiredSessionCount = 0;
+	private volatile BigInteger totalSessionLifetime = BigInteger.ZERO;
+	private final AtomicInteger highestSessionCount = new AtomicInteger();
+	private final boolean statisticsEnabled;
+
+	private volatile long startTime;
+	private ValueBytesConverter converter = new ValueBytesConverter();
+
+	private DataSource dataSource;
+
+	public JdbcSessionManager(DataSource dataSource) {
+		this(dataSource,  new SessionCookieConfig());
+	}
+
+	public JdbcSessionManager(DataSource dataSource, SessionConfig config) {
+		this(dataSource, config, DEPLOY_NAME, true);
+	}
+
+	public JdbcSessionManager(DataSource dataSource, SessionConfig config, String deploymentName,  boolean statisticsEnabled) {
+		this.dataSource = dataSource;
+		converter = new ValueBytesConverter();
+		this.config = config;
+		this.deploymentName = deploymentName;
+		this.statisticsEnabled = statisticsEnabled;
+		prepareQueries();
+	}
+
+
+	public SessionConfig getConfig() {
+		return config;
+	}
+
+	public void setConfig(SessionConfig config) {
+		this.config = config;
+	}
+
+	public JdbcSession createSession() {
+		JdbcSession session = new JdbcSession(this, this.getConfig());
+		if (this.defaultMaxInactiveInterval != null) {
+			session.setMaxInactiveInterval(this.defaultMaxInactiveInterval);
+		}
+		return session;
+	}
+
+	@Override
+	public Session createSession(final HttpServerExchange serverExchange, final SessionConfig config) {
+		return null;
+	}
+
+	public void save(JdbcSession session) {
+		if (session.isNew()) {
+			try (final Connection connection = dataSource.getConnection()) {
+				connection.setAutoCommit(false);
+
+				PreparedStatement stmt = connection.prepareStatement(this.createSessionQuery);
+				stmt.setString(1, session.getId());
+				stmt.setLong(2, session.getCreationTime());
+				stmt.setLong(3, session.getLastAccessedTime());
+				stmt.setInt(4, session.getMaxInactiveInterval());
+				stmt.setLong(5, session.getExpiryTime());
+				stmt.setString(6, session.getPrincipalName());
+				int count = stmt.executeUpdate();
+				if (!session.getAttributeNames().isEmpty()) {
+					final List<String> attributeNames = new ArrayList<>(session.getAttributeNames());
+					try (PreparedStatement psAtt = connection.prepareStatement(this.createSessionAttributeQuery)) {
+						for (String attributeName : attributeNames) {
+							psAtt.setString(1, session.getId());
+							psAtt.setString(2, attributeName);
+							serialize(psAtt, 3, session.getAttribute(attributeName));
+							psAtt.addBatch();
+						}
+						psAtt.executeBatch();
+					}
+				}
+				connection.commit();
+
+				if (count != 1) {
+					logger.error("Failed to insert session: {}", session.getId());
+				}
+			} catch (SQLException e) {
+				logger.error("SqlException:", e);
+			}
+		}
+		else {
+			try (final Connection connection = dataSource.getConnection()) {
+
+				connection.setAutoCommit(false);
+				PreparedStatement stmt = connection.prepareStatement(this.updateSessionQuery);
+				stmt.setString(1, session.getId());
+				stmt.setLong(2, session.getLastAccessedTime());
+				stmt.setInt(3, session.getMaxInactiveInterval());
+				stmt.setLong(4, session.getExpiryTime());
+				stmt.setString(5, session.getPrincipalName());
+				stmt.setString(6, session.getId());
+				int count = stmt.executeUpdate();
+
+				Map<String, Object> delta = session.getDelta();
+				if (!delta.isEmpty()) {
+					for (final Map.Entry<String, Object> entry : delta.entrySet()) {
+						if (entry.getValue() == null) {
+							try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionAttributeQuery)) {
+								psAtt.setString(1, session.getId());
+								psAtt.setString(2, entry.getKey());
+								psAtt.executeUpdate();
+							}
+						} else {
+							int updatedCount = 0;
+							try (PreparedStatement psAtt = connection.prepareStatement(this.updateSessionAttributeQuery)) {
+								psAtt.setString(1, session.getId());
+								psAtt.setString(2, entry.getKey());
+								updatedCount = psAtt.executeUpdate();
+							}
+							if (updatedCount == 0) {
+								try (PreparedStatement psAtt = connection.prepareStatement(this.createSessionAttributeQuery)) {
+									psAtt.setString(1, session.getId());
+									psAtt.setString(2, entry.getKey());
+									serialize(psAtt, 3, entry.getValue());
+
+									psAtt.executeUpdate();
+								}
+							}
+
+						}
+					}
+				}
+				connection.commit();
+			} catch (SQLException e) {
+				logger.error("SqlException:", e);
+			}
+		}
+		session.clearChangeFlags();
+	}
+
+	@Override
+	public Session getSession(final HttpServerExchange serverExchange, final SessionConfig config) {
+		return null;
+	}
+
+	@Override
+	public JdbcSession getSession(String id) {
+		return findById(id);
+	}
+
+	public JdbcSession findById(final String id) {
+		JdbcSession session = null;
+		try (final Connection connection = dataSource.getConnection()) {
+
+			PreparedStatement stmt = connection.prepareStatement(this.getSessionQuery);
+			stmt.setString(1, id);
+			ResultSet rs = stmt.executeQuery();
+			List<JdbcSession> sessions = extractData(rs);
+			if (!sessions.isEmpty()) {
+				session = sessions.get(0);
+			}
+
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
+
+
+		if (session != null) {
+			if (session.isExpired()) {
+				deleteById(id);
+			}
+			else {
+				return session;
+			}
+		}
+		return null;
+	}
+
+	public void deleteById(final String id) {
+		try (final Connection connection = dataSource.getConnection()) {
+			try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionQuery)) {
+				psAtt.setString(1, id);
+				psAtt.executeUpdate();
+			}
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
+	}
+
+	public Map<String, JdbcSession> findByIndexNameAndIndexValue(String indexName,
+			final String indexValue) {
+		if (!PRINCIPAL_NAME_INDEX_NAME.equals(indexName)) {
+			return Collections.emptyMap();
+		}
+
+
+		try (final Connection connection = dataSource.getConnection()) {
+
+			PreparedStatement stmt = connection.prepareStatement(this.listSessionsByPrincipalNameQuery);
+			stmt.setString(1, indexValue);
+			ResultSet rs = stmt.executeQuery();
+			List<JdbcSession> sessions = extractData(rs);
+
+			if (sessions.isEmpty()) {
+				return null;
+			}
+
+			Map<String, JdbcSession> sessionMap = new HashMap<>(
+					sessions.size());
+			for (JdbcSession session : sessions) {
+				sessionMap.put(session.getId(), session);
+			}
+			return sessionMap;
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
+		return null;
+
+	}
+
+	public void cleanUpExpiredSessions() {
+		int deletedCount= 0;
+		try (final Connection connection = dataSource.getConnection()) {
+			try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionsByExpiryTimeQuery)) {
+				psAtt.setLong(1, System.currentTimeMillis());
+				psAtt.executeUpdate();
+			}
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
+
+		if (logger.isDebugEnabled()) {
+			logger.debug("Cleaned up " + deletedCount + " expired sessions");
+		}
+	}
+
+
+
+	private String getQuery(String base) {
+		return base;
+	}
+
+	private void prepareQueries() {
+		this.createSessionQuery = getQuery(CREATE_SESSION_QUERY);
+		this.createSessionAttributeQuery = getQuery(CREATE_SESSION_ATTRIBUTE_QUERY);
+		this.getSessionQuery = getQuery(GET_SESSION_QUERY);
+		this.updateSessionQuery = getQuery(UPDATE_SESSION_QUERY);
+		this.updateSessionAttributeQuery = getQuery(UPDATE_SESSION_ATTRIBUTE_QUERY);
+		this.deleteSessionAttributeQuery = getQuery(DELETE_SESSION_ATTRIBUTE_QUERY);
+		this.deleteSessionQuery = getQuery(DELETE_SESSION_QUERY);
+		this.listSessionsByPrincipalNameQuery =
+				getQuery(LIST_SESSIONS_BY_PRINCIPAL_NAME_QUERY);
+		this.deleteSessionsByExpiryTimeQuery =
+				getQuery(DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY);
+	}
+
+
+	@Override
+	public String getDeploymentName() {
+		return this.deploymentName;
+	}
+
+	@Override
+	public void start() {
+		createdSessionCount.set(0);
+		expiredSessionCount = 0;
+		rejectedSessionCount.set(0);
+		totalSessionLifetime = BigInteger.ZERO;
+		startTime = System.currentTimeMillis();
+	}
+
+	@Override
+	public void stop() {
+	//	for (Map.Entry<String, SessionImpl> session : sessions.entrySet()) {
+		//	sessionListeners.sessionDestroyed(session.getValue(), null, SessionListener.SessionDestroyedReason.UNDEPLOY);
+	//	}
+	//	sessions.clear();
+	}
+
+
+	@Override
+	public synchronized void registerSessionListener(final SessionListener listener) {
+		UndertowLogger.SESSION_LOGGER.debugf("Registered session listener %s", listener);
+		sessionListeners.addSessionListener(listener);
+	}
+
+	@Override
+	public synchronized void removeSessionListener(final SessionListener listener) {
+		UndertowLogger.SESSION_LOGGER.debugf("Removed session listener %s", listener);
+		sessionListeners.removeSessionListener(listener);
+	}
+
+	public boolean isStatisticsEnabled() {
+		return statisticsEnabled;
+	}
+
+	@Override
+	public Set<String> getTransientSessions() {
+		return getAllSessions();
+	}
+
+	@Override
+	public Set<String> getActiveSessions() {
+		return getAllSessions();
+	}
+
+	@Override
+	public Set<String> getAllSessions() {
+		//TODO
+		return null;
+	}
+
+	/**
+	 * Set the maximum inactive interval in seconds between requests before newly created
+	 * sessions will be invalidated. A negative time indicates that the session will never
+	 * timeout. The default is 1800 (30 minutes).
+	 * @param defaultMaxInactiveInterval the maximum inactive interval in seconds
+	 */
+	public void setDefaultMaxInactiveInterval(Integer defaultMaxInactiveInterval) {
+		this.defaultMaxInactiveInterval = defaultMaxInactiveInterval;
+	}
+
+	@Override
+	public void setDefaultSessionTimeout(final int timeout) {
+		this.defaultMaxInactiveInterval = timeout;
+	}
+
+
+	@Override
+	public SessionManagerStatistics getStatistics() {
+		return null;
+	}
+
+	public Integer getDefaultMaxInactiveInterval() {
+		return defaultMaxInactiveInterval;
+	}
+
+	private void serialize(PreparedStatement ps, int paramIndex, Object attributeValue)
+			throws SQLException {
+		try {
+			byte[]  bytes = converter.serializer(attributeValue);
+			if (bytes != null) {
+				ps.setBlob(paramIndex, new ByteArrayInputStream(bytes), bytes.length);
+			}
+			else {
+				ps.setBlob(paramIndex, (Blob) null);
+			}
+		} catch (SerializationFailedException e) {
+			throw new SQLException("Failed to serialize object ", e);
+		}
+
+	}
+
+	private Object deserialize(ResultSet rs, String columnName)
+			throws SQLException {
+		byte[]  result = rs.getBytes(columnName);
+		try {
+			return converter.deserialize(result);
+		} catch (SerializationFailedException e) {
+			throw new SQLException("Failed to serialize object ", e);
+		}
+	}
+
+
+	public String resolvePrincipal(Session session) {
+		String principalName = (String)session.getAttribute(PRINCIPAL_NAME_INDEX_NAME);
+		if (principalName != null) {
+			return principalName;
+		}
+		Object authentication = session.getAttribute(SECURITY_CONTEXT);
+		if (authentication != null) {
+			//TODO
+			return null;
+		}
+		return null;
+	}
+	public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
+		List<JdbcSession> sessions = new ArrayList<>();
+		while (rs.next()) {
+			String id = rs.getString("SESSION_ID");
+			JdbcSession session;
+			if (sessions.size() > 0 && getLast(sessions).getId().equals(id)) {
+				session = getLast(sessions);
+			}
+			else {
+				SessionImpl delegate = new SessionImpl(this, rs.getString("SESSION_ID"), rs.getInt("MAX_INACTIVE_INTERVAL"), rs.getLong("CREATION_TIME"));
+				delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
+				session = new JdbcSession(delegate,  getConfig());
+			}
+			String attributeName = rs.getString("ATTRIBUTE_NAME");
+			if (attributeName != null) {
+				session.setAttribute(attributeName, deserialize(rs, "ATTRIBUTE_BYTES"));
+			}
+			sessions.add(session);
+		}
+		return sessions;
+	}
+
+	private JdbcSession getLast(List<JdbcSession> sessions) {
+		return sessions.get(sessions.size() - 1);
+	}
+
+
+}

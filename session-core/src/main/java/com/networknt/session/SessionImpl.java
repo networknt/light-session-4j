@@ -21,8 +21,8 @@ public class SessionImpl implements Session {
     final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
     final SessionManager sessionManager;
     final ConcurrentMap<String, Object> attributes = new ConcurrentHashMap<>();
-    volatile long lastAccessed;
-    final long creationTime;
+    private volatile long lastAccessed;
+    private long creationTime;
     volatile int maxInactiveInterval;
 
 
@@ -40,13 +40,18 @@ public class SessionImpl implements Session {
     }
 
     public SessionImpl(SessionManager sessionManager, final String sessionId, final int maxInactiveInterval) {
+
+        this(sessionManager, sessionId, maxInactiveInterval, System.currentTimeMillis());
+        lastAccessed = System.currentTimeMillis();
+    }
+
+    public SessionImpl(SessionManager sessionManager, final String sessionId, final int maxInactiveInterval, long creationTime) {
         this.sessionManager = sessionManager;
         this.sessionId = sessionId;
 
-        creationTime = lastAccessed = System.currentTimeMillis();
+        this.creationTime = creationTime;
         this.maxInactiveInterval = maxInactiveInterval;
     }
-
 
 
     @Override

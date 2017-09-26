@@ -1,9 +1,8 @@
-package com.networknt.session.data;
+package com.networknt.session.hazelcase;
 
 import com.networknt.session.MapSession;
 
 import com.networknt.session.SessionImpl;
-import com.networknt.session.data.hazelcast.HazelcastSessionRepository;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.session.*;
@@ -21,7 +20,7 @@ public class HazelcastSession implements Session {
     private final SessionImpl delegate;
     private boolean changed;
     private String originalId;
-    private HazelcastSessionRepository hazelcastSessionRepository;
+    private HazelcastSessionManager hazelcastSessionManager;
     private SessionConfig sessionCookieConfig;
     /**
      * Creates a new instance ensuring to mark all of the new attributes to be
@@ -29,22 +28,22 @@ public class HazelcastSession implements Session {
      */
 
 
-    public HazelcastSession(HazelcastSessionRepository hazelcastSessionRepository) {
-        this (hazelcastSessionRepository, new SessionCookieConfig());
+    public HazelcastSession(HazelcastSessionManager hazelcastSessionManager) {
+        this (hazelcastSessionManager, new SessionCookieConfig());
     }
 
-    public HazelcastSession(HazelcastSessionRepository hazelcastSessionRepository, String sessionId) {
-        this (hazelcastSessionRepository, new SessionCookieConfig(), sessionId);
+    public HazelcastSession(HazelcastSessionManager hazelcastSessionManager, String sessionId) {
+        this (hazelcastSessionManager, new SessionCookieConfig(), sessionId);
     }
 
-    public HazelcastSession(HazelcastSessionRepository hazelcastSessionRepository, SessionConfig sessionCookieConfig) {
-        this(new SessionImpl(hazelcastSessionRepository, hazelcastSessionRepository.getDefaultSessionTimeout()), hazelcastSessionRepository, sessionCookieConfig);
+    public HazelcastSession(HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {
+        this(new SessionImpl(hazelcastSessionManager, hazelcastSessionManager.getDefaultSessionTimeout()), hazelcastSessionManager, sessionCookieConfig);
         this.changed = true;
         flushImmediateIfNecessary();
     }
 
-    public HazelcastSession(HazelcastSessionRepository hazelcastSessionRepository, SessionConfig sessionCookieConfig,  String sessionId) {
-        this(new SessionImpl(hazelcastSessionRepository, sessionId, hazelcastSessionRepository.getDefaultSessionTimeout()), hazelcastSessionRepository, sessionCookieConfig);
+    public HazelcastSession(HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig, String sessionId) {
+        this(new SessionImpl(hazelcastSessionManager, sessionId, hazelcastSessionManager.getDefaultSessionTimeout()), hazelcastSessionManager, sessionCookieConfig);
         this.changed = true;
         flushImmediateIfNecessary();
     }
@@ -54,11 +53,11 @@ public class HazelcastSession implements Session {
      * @param cached the {@link MapSession} that represents the persisted session that
      * was retrieved. Cannot be {@code null}.
      */
-    public HazelcastSession(SessionImpl cached, HazelcastSessionRepository hazelcastSessionRepository, SessionConfig sessionCookieConfig) {
+    public HazelcastSession(SessionImpl cached, HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {
         Objects.requireNonNull(cached);
         this.delegate = cached;
         this.originalId = cached.getId();
-        this.hazelcastSessionRepository = hazelcastSessionRepository;
+        this.hazelcastSessionManager = hazelcastSessionManager;
         this.sessionCookieConfig = sessionCookieConfig;
     }
 
@@ -139,7 +138,7 @@ public class HazelcastSession implements Session {
     @Override
     public Object removeAttribute(String attributeName) {
         final Object existing = this.delegate.removeAttribute(attributeName);
-        hazelcastSessionRepository.getSessionListeners().attributeRemoved(this, attributeName, existing);
+        hazelcastSessionManager.getSessionListeners().attributeRemoved(this, attributeName, existing);
         this.changed = true;
         flushImmediateIfNecessary();
         return existing;
@@ -147,21 +146,21 @@ public class HazelcastSession implements Session {
 
     @Override
     public SessionManager getSessionManager() {
-        return hazelcastSessionRepository;
+        return hazelcastSessionManager;
     }
 
     @Override
     public void invalidate(final HttpServerExchange exchange) {
-        //       invalidate(exchange, SessionListener.SessionDestroyedReason.INVALIDATED);
+        invalidate(exchange, SessionListener.SessionDestroyedReason.INVALIDATED);
         if(exchange != null) {
-            exchange.removeAttachment(hazelcastSessionRepository.NEW_SESSION);
+            exchange.removeAttachment(hazelcastSessionManager.NEW_SESSION);
         }
     }
 
 
 
     void invalidate(final HttpServerExchange exchange, SessionListener.SessionDestroyedReason reason) {
-        SessionImpl sess = (SessionImpl)hazelcastSessionRepository.getSessions().remove(getId());
+        SessionImpl sess = (SessionImpl) hazelcastSessionManager.getSessions().remove(getId());
         if (sess == null) {
             if (reason == SessionListener.SessionDestroyedReason.INVALIDATED) {
                 throw UndertowMessages.MESSAGES.sessionAlreadyInvalidated();
@@ -170,11 +169,11 @@ public class HazelcastSession implements Session {
         }
 
 
-        hazelcastSessionRepository.getSessionListeners().sessionDestroyed(this, exchange, reason);
+        hazelcastSessionManager.getSessionListeners().sessionDestroyed(this, exchange, reason);
         this.delegate.setInvalid(true);
 
-        if(hazelcastSessionRepository.isStatisticsEnabled()) {
-            hazelcastSessionRepository.updateStatistics(this);
+        if(hazelcastSessionManager.isStatisticsEnabled()) {
+            hazelcastSessionManager.updateStatistics(this);
         }
         if (exchange != null) {
             sessionCookieConfig.clearSession(exchange, this.getId());
@@ -186,11 +185,11 @@ public class HazelcastSession implements Session {
         String oldId = getId();
         String newId = this.delegate.changeSessionId(exchange, config);
         if(!this.delegate.isInvalid()) {
-            hazelcastSessionRepository.getSessions().put(newId, this.getDelegate());
+            hazelcastSessionManager.getSessions().put(newId, this.getDelegate());
             config.setSessionId(exchange, this.getId());
         }
-        hazelcastSessionRepository.getSessions().remove(oldId);
-        hazelcastSessionRepository.getSessionListeners().sessionIdChanged(this, oldId);
+        hazelcastSessionManager.getSessions().remove(oldId);
+        hazelcastSessionManager.getSessionListeners().sessionIdChanged(this, oldId);
         return newId;
     }
 
@@ -207,8 +206,8 @@ public class HazelcastSession implements Session {
     }
 
     private void flushImmediateIfNecessary() {
-        if (hazelcastSessionRepository. getHazelcastFlushMode() == HazelcastFlushMode.IMMEDIATE) {
-            hazelcastSessionRepository.save(this);
+        if (hazelcastSessionManager. getHazelcastFlushMode() == HazelcastFlushMode.IMMEDIATE) {
+            hazelcastSessionManager.save(this);
         }
     }
 
