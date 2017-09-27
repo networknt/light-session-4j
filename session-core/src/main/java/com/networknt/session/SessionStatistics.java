@@ -17,6 +17,16 @@ public class SessionStatistics implements Serializable {
     private long highestSessionCount;
     private  long startTime;
 
+    private static SessionStatistics instance;
+
+    private SessionStatistics() {
+
+    }
+
+    public static SessionStatistics getInstance(){
+        return instance;
+    }
+
     public long getCreatedSessionCount() {
         return createdSessionCount;
     }

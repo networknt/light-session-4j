@@ -1,23 +1,13 @@
-/*
- * JBoss, Home of Professional Open Source.
- * Copyright 2014 Red Hat, Inc., and individual contributors
- * as indicated by the @author tags.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
- */
+
 
 package com.networknt.session;
 
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.IMap;
+import com.networknt.config.Config;
+import com.networknt.service.SingletonServiceFactory;
+import com.networknt.session.hazelcase.HazelcastSessionManager;
+import com.networknt.session.jdbc.JdbcSessionManager;
 import io.undertow.Handlers;
 import io.undertow.UndertowMessages;
 import io.undertow.server.ExchangeCompletionListener;
@@ -25,34 +15,48 @@ import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.ResponseCodeHandler;
 import io.undertow.server.session.Session;
-import io.undertow.server.session.SessionAttachmentHandler;
 import io.undertow.server.session.SessionConfig;
 import io.undertow.server.session.SessionManager;
+
+import javax.sql.DataSource;
 
 
 public class SessionHandler implements HttpHandler {
 
     private volatile HttpHandler next = ResponseCodeHandler.HANDLE_404;
 
-    private volatile SessionManager sessionManager;
+    private static final String HAZELCAST_REPOSITORY = "HazelCast";
+    private static final String JDBC_REPOSITORY = "jdbc";
+    private static final String REDIS_REPOSITORY = "redis";
 
-    private final SessionConfig sessionConfig;
+    private SessionManager sessionManager;
 
-    public SessionHandler(final SessionManager sessionManager, final SessionConfig sessionConfig) {
-        this.sessionConfig = sessionConfig;
-        if (sessionManager == null) {
-            throw UndertowMessages.MESSAGES.sessionManagerMustNotBeNull();
-        }
-        this.sessionManager = sessionManager;
+    private SessionConfig sessionConfig;
+    private SessionStatistics sessionStatistics = SessionStatistics.getInstance() ;
+    private IMap<String, SessionImpl> sessions = Hazelcast.newHazelcastInstance().getMap("sessions");
+
+    public static final String CONFIG_NAME = "session";
+    public static SessionManagerConfig config;
+    static {
+        config = (SessionManagerConfig) Config.getInstance().getJsonObjectConfig(CONFIG_NAME, SessionManagerConfig.class);
+
     }
 
-    public SessionHandler(final HttpHandler next, final SessionManager sessionManager, final SessionConfig sessionConfig) {
-        this.sessionConfig = sessionConfig;
+
+    public SessionHandler() {
+        sessionConfig = (SessionConfig) SingletonServiceFactory.getBean(SessionConfig.class);
         if (sessionManager == null) {
             throw UndertowMessages.MESSAGES.sessionManagerMustNotBeNull();
         }
-        this.next = next;
-        this.sessionManager = sessionManager;
+
+        if (HAZELCAST_REPOSITORY.equalsIgnoreCase(config.getType())) {
+            this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
+        } else if (JDBC_REPOSITORY.equalsIgnoreCase(config.getType()) ) {
+            DataSource ds = (DataSource) SingletonServiceFactory.getBean(DataSource.class);
+            this.sessionManager = new JdbcSessionManager(ds,  sessionConfig, config.getDeployName(), sessionStatistics);
+        } else {
+            this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
+        }
     }
 
     @Override

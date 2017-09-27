@@ -10,7 +10,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.networknt</groupId>
-    <artifactId>redis-manager</artifactId>
+    <artifactId>session-handler</artifactId>
 
     <dependencies>
         <dependency>
@@ -19,15 +19,23 @@
         </dependency>
         <dependency>
             <groupId>com.networknt</groupId>
-            <artifactId>session-core</artifactId>
+            <artifactId>config</artifactId>
         </dependency>
         <dependency>
-            <groupId>redis.clients</groupId>
-            <artifactId>jedis</artifactId>
+            <groupId>com.networknt</groupId>
+            <artifactId>service</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
+            <groupId>com.hazelcast</groupId>
+            <artifactId>hazelcast</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>hazelcast-manager</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>jdbc-manager</artifactId>
         </dependency>
     </dependencies>
 

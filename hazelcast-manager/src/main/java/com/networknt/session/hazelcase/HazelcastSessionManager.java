@@ -87,8 +87,8 @@ public class HazelcastSessionManager implements
 		this(sessions, DEPLOY_NAME);
 	}
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String id) {
-		this(sessions, id, -1);
+	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName) {
+		this(sessions, deploymentName, -1);
 	}
 
 
@@ -211,6 +211,7 @@ public class HazelcastSessionManager implements
 		return sessions;
 	}
 
+	@Override
 	public void save(HazelcastSession session) {
 		if (!session.getId().equals(session.getOriginalId())) {
 			this.sessions.remove(session.getOriginalId());
@@ -252,10 +253,12 @@ public class HazelcastSessionManager implements
 		return new HazelcastSession(saved, this, new SessionCookieConfig());
 	}
 
+	@Override
 	public void deleteById(String id) {
 		this.sessions.remove(id);
 	}
 
+	@Override
 	public Map<String, HazelcastSession> findByIndexNameAndIndexValue(
 			String indexName, String indexValue) {
 		if (!PRINCIPAL_NAME_INDEX_NAME.equals(indexName)) {

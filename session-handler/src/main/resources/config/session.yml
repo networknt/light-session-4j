@@ -1,0 +1,8 @@
+---
+# Session handler configuration
+
+type: HazelCast
+
+deployName: LIGHT-SESSION
+maxSize: 1000
+

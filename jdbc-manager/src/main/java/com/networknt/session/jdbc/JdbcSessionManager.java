@@ -201,7 +201,7 @@ public class JdbcSessionManager implements
 			sessionID = sessionIdGenerator.createSessionId();
 		}
 
-		JdbcSession session = new JdbcSession(this, getConfig(), sessionID);
+		JdbcSession session = new JdbcSession(this, config, sessionID);
 
 		UndertowLogger.SESSION_LOGGER.debugf("Created session with id %s for exchange %s", sessionID, serverExchange);
 
