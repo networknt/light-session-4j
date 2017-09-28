@@ -2,6 +2,7 @@ package com.networknt.session.hazelcast;
 
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.IMap;
+import com.networknt.session.MapSession;
 import com.networknt.session.SessionImpl;
 import com.networknt.session.SessionStatistics;
 import io.undertow.server.session.SecureRandomSessionIdGenerator;
@@ -16,7 +17,7 @@ import org.junit.Test;
  */
 public class HazelCastSessionManagerTest {
 
-    private  static IMap<String, SessionImpl> sessions;
+    private  static IMap<String, MapSession> sessions;
 
     private static HazelcastSessionManager sessionManager;
 
@@ -39,5 +40,13 @@ public class HazelCastSessionManagerTest {
     public void testSave() {
         sessionManager.save(session);
         Assert.assertTrue(sessions.size()>0);
+    }
+
+    @Test
+    public void testGetSession() {
+        sessionManager.save(session);
+        session.getId();
+        Assert.assertTrue(sessionManager.getAllSessions().size()>0);
+        Assert.assertNotNull(sessionManager.getSession(session.getId()));
     }
 }

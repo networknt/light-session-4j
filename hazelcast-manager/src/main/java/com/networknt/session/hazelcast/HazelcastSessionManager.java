@@ -7,10 +7,7 @@ import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryEvictedListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
 import com.hazelcast.query.Predicates;
-import com.networknt.session.FindByIndexNameSessionRepository;
-import com.networknt.session.SessionImpl;
-import com.networknt.session.SessionRepository;
-import com.networknt.session.SessionStatistics;
+import com.networknt.session.*;
 import io.undertow.UndertowLogger;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
@@ -48,7 +45,7 @@ import java.util.concurrent.TimeUnit;
  *
  */
 public class HazelcastSessionManager implements
-		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager, Serializable,
+		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager,
 		EntryAddedListener<String, Session>,
 		EntryEvictedListener<String, Session>,
 		EntryRemovedListener<String, Session> {
@@ -63,7 +60,7 @@ public class HazelcastSessionManager implements
 
 	private static final Logger logger = LoggerFactory.getLogger(HazelcastSessionManager.class);
 
-	private final IMap<String, SessionImpl> sessions;
+	private final IMap<String, MapSession> sessions;
 	private final SessionStatistics sessionStatistics = null;
 	private final SessionListeners sessionListeners = new SessionListeners();
 
@@ -78,22 +75,22 @@ public class HazelcastSessionManager implements
 
 	private String sessionListenerId;
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions) {
+	public HazelcastSessionManager(IMap<String, MapSession> sessions) {
 	//	Objects.requireNonNull(sessions);
 		this(sessions, DEPLOY_NAME);
 	}
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName) {
+	public HazelcastSessionManager(IMap<String, MapSession> sessions, String deploymentName) {
 		this(sessions, deploymentName, -1);
 	}
 
 
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions) {
+	public HazelcastSessionManager(IMap<String, MapSession> sessions, String deploymentName, int maxSessions) {
 		this(sessions, deploymentName, maxSessions,  null);
 	}
 
-	public HazelcastSessionManager(IMap<String, SessionImpl> sessions, String deploymentName, int maxSessions, SessionStatistics sessionStatistics) {
+	public HazelcastSessionManager(IMap<String, MapSession> sessions, String deploymentName, int maxSessions, SessionStatistics sessionStatistics) {
 		Objects.requireNonNull(sessions);
 		this.sessions = sessions;
 		this.deploymentName = deploymentName;
@@ -117,10 +114,7 @@ public class HazelcastSessionManager implements
 
 	@Override
 	public void stop() {
-		for (Map.Entry<String, SessionImpl> session : sessions.entrySet()) {
-			sessionListeners.sessionDestroyed(session.getValue(), null, SessionListener.SessionDestroyedReason.UNDEPLOY);
-		}
-		sessions.clear();
+
 	}
 
 
@@ -203,7 +197,7 @@ public class HazelcastSessionManager implements
 		return sessionListeners;
 	}
 
-	public IMap<String, SessionImpl> getSessions() {
+	public IMap<String, MapSession> getSessions() {
 		return sessions;
 	}
 
@@ -231,14 +225,14 @@ public class HazelcastSessionManager implements
 		String sessionId = config.findSessionId(serverExchange);
 		HazelcastSession session =  getSession(sessionId);
 		if(session != null) {
-			session.getDelegate().requestStarted(serverExchange);
+			session.requestStarted(serverExchange);
 		}
 		return session;
 	}
 
 	@Override
 	public HazelcastSession getSession(String id) {
-		SessionImpl saved = this.sessions.get(id);
+		MapSession saved = this.sessions.get(id);
 		if (saved == null) {
 			return null;
 		}
@@ -260,11 +254,11 @@ public class HazelcastSessionManager implements
 		if (!PRINCIPAL_NAME_INDEX_NAME.equals(indexName)) {
 			return Collections.emptyMap();
 		}
-		Collection<SessionImpl> sessions = this.sessions.values(
+		Collection<MapSession> sessions = this.sessions.values(
 				Predicates.equal(PRINCIPAL_NAME_ATTRIBUTE, indexValue));
 		Map<String, HazelcastSession> sessionMap = new HashMap<>(
 				sessions.size());
-		for (SessionImpl session : sessions) {
+		for (MapSession session : sessions) {
 			sessionMap.put(session.getId(), new HazelcastSession(session, this, new SessionCookieConfig()));
 		}
 		return sessionMap;

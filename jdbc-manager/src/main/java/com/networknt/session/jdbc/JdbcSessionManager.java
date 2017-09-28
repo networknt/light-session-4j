@@ -100,6 +100,12 @@ public class JdbcSessionManager implements
 					"LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
 					"WHERE S.SESSION_ID = ?";
 
+	private static final String GET_ALL_SESSION_QUERY =
+			"SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
+					"FROM light_session S " +
+					"LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
+					"WHERE EXPIRY_TIME > ?";
+
 	private static final String UPDATE_SESSION_QUERY =
 			"UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
 					"WHERE SESSION_ID = ?";
@@ -133,6 +139,7 @@ public class JdbcSessionManager implements
 	private String createSessionQuery;
 	private String createSessionAttributeQuery;
 	private String getSessionQuery;
+	private String getAllSessionQuery;
 	private String updateSessionQuery;
 	private String updateSessionAttributeQuery;
 	private String deleteSessionAttributeQuery;
@@ -228,8 +235,25 @@ public class JdbcSessionManager implements
 		return sessionListeners;
 	}
 
-	public Map<String, SessionImpl> getSessions() {
-		return new HashMap<String, SessionImpl>();
+	public Map<String, Session> getSessions() {
+		Map<String, Session> sessionMap = new HashMap<>();
+		try (final Connection connection = dataSource.getConnection()) {
+
+			PreparedStatement stmt = connection.prepareStatement(this.getAllSessionQuery);
+			stmt.setLong(1, System.currentTimeMillis());
+			ResultSet rs = stmt.executeQuery();
+			List<JdbcSession> sessions = extractData(rs);
+			if (!sessions.isEmpty()) {
+
+				for (JdbcSession session : sessions) {
+					sessionMap.put(session.getId(), session);
+				}
+			}
+
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
+		return sessionMap;
 	}
 
 
@@ -445,6 +469,7 @@ public class JdbcSessionManager implements
 		this.createSessionQuery = getQuery(CREATE_SESSION_QUERY);
 		this.createSessionAttributeQuery = getQuery(CREATE_SESSION_ATTRIBUTE_QUERY);
 		this.getSessionQuery = getQuery(GET_SESSION_QUERY);
+		this.getAllSessionQuery = getQuery(GET_ALL_SESSION_QUERY);
 		this.updateSessionQuery = getQuery(UPDATE_SESSION_QUERY);
 		this.updateSessionAttributeQuery = getQuery(UPDATE_SESSION_ATTRIBUTE_QUERY);
 		this.deleteSessionAttributeQuery = getQuery(DELETE_SESSION_ATTRIBUTE_QUERY);

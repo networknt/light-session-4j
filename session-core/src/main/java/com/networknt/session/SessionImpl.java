@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentMap;
  */
 public class SessionImpl implements Session, Serializable {
 
- //   final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
+    final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
     final SessionManager sessionManager;
     final ConcurrentMap<String, Object> attributes = new ConcurrentHashMap<>();
     private volatile long lastAccessed;
@@ -61,13 +61,13 @@ public class SessionImpl implements Session, Serializable {
     }
 
     public void requestStarted(HttpServerExchange serverExchange) {
-    /*    Boolean existing = serverExchange.getAttachment(FIRST_REQUEST_ACCESS);
+        Boolean existing = serverExchange.getAttachment(FIRST_REQUEST_ACCESS);
         if(existing == null) {
             if (!invalid) {
                 lastAccessed = System.currentTimeMillis();
             }
            serverExchange.putAttachment(FIRST_REQUEST_ACCESS, Boolean.TRUE);
-        }*/
+        }
     }
 
     @Override

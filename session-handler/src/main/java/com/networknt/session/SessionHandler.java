@@ -14,6 +14,7 @@ import io.undertow.server.ExchangeCompletionListener;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.ResponseCodeHandler;
+import io.undertow.server.session.InMemorySessionManager;
 import io.undertow.server.session.Session;
 import io.undertow.server.session.SessionConfig;
 import io.undertow.server.session.SessionManager;
@@ -33,7 +34,7 @@ public class SessionHandler implements HttpHandler {
 
     private SessionConfig sessionConfig;
     private SessionStatistics sessionStatistics = SessionStatistics.getInstance() ;
-    private IMap<String, SessionImpl> sessions = Hazelcast.newHazelcastInstance().getMap("sessions");
+    private IMap<String, MapSession> sessions = Hazelcast.newHazelcastInstance().getMap("sessions");
 
     public static final String CONFIG_NAME = "session";
     public static SessionManagerConfig config;
@@ -54,8 +55,10 @@ public class SessionHandler implements HttpHandler {
         } else if (JDBC_REPOSITORY.equalsIgnoreCase(config.getType()) ) {
             DataSource ds = (DataSource) SingletonServiceFactory.getBean(DataSource.class);
             this.sessionManager = new JdbcSessionManager(ds,  sessionConfig, config.getDeployName(), sessionStatistics);
+        } else if (REDIS_REPOSITORY.equalsIgnoreCase(config.getType())) {
+           // this.sessionManager = new RedisSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
         } else {
-            this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
+            this.sessionManager = new InMemorySessionManager(config.getDeployName(), config.getMaxSize(), true);
         }
     }
 

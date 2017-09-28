@@ -13,13 +13,10 @@ DROP table IF EXISTS light_session_attributes;
   );
 
 
-
-
   CREATE TABLE light_session_attributes (
    session_id VARCHAR2(100) NOT NULL,
    attribute_name VARCHAR(200) NOT NULL,
    attribute_bytes BYTEA,
    PRIMARY KEY(session_id, attribute_name)
   );
-
 

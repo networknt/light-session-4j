@@ -1,10 +1,12 @@
 package com.networknt.session.hazelcast;
 
 
+import com.networknt.session.MapSession;
 import com.networknt.session.SessionImpl;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.session.*;
+import io.undertow.util.AttachmentKey;
 
 import java.util.Objects;
 import java.util.Set;
@@ -16,11 +18,16 @@ import java.util.Set;
  */
 public class HazelcastSession implements Session {
 
-    private final SessionImpl delegate;
+    final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
+
+    private final MapSession delegate;
     private boolean changed;
     private String originalId;
     private HazelcastSessionManager hazelcastSessionManager;
     private SessionConfig sessionCookieConfig;
+    private boolean invalid = false;
+
+
     /**
      * Creates a new instance ensuring to mark all of the new attributes to be
      * persisted in the next save operation.
@@ -36,13 +43,13 @@ public class HazelcastSession implements Session {
     }
 
     public HazelcastSession(HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {
-        this(new SessionImpl(hazelcastSessionManager, hazelcastSessionManager.getDefaultSessionTimeout()), hazelcastSessionManager, sessionCookieConfig);
+        this(new MapSession(), hazelcastSessionManager, sessionCookieConfig);
         this.changed = true;
         flushImmediateIfNecessary();
     }
 
     public HazelcastSession(HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig, String sessionId) {
-        this(new SessionImpl(hazelcastSessionManager, sessionId, hazelcastSessionManager.getDefaultSessionTimeout()), hazelcastSessionManager, sessionCookieConfig);
+        this(new MapSession(sessionId), hazelcastSessionManager, sessionCookieConfig);
         this.changed = true;
         flushImmediateIfNecessary();
     }
@@ -52,12 +59,13 @@ public class HazelcastSession implements Session {
      * @param cached the {@link SessionImpl} that represents the persisted session that
      * was retrieved. Cannot be {@code null}.
      */
-    public HazelcastSession(SessionImpl cached, HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {
+    public HazelcastSession(MapSession cached, HazelcastSessionManager hazelcastSessionManager, SessionConfig sessionCookieConfig) {
         Objects.requireNonNull(cached);
         this.delegate = cached;
         this.originalId = cached.getId();
         this.hazelcastSessionManager = hazelcastSessionManager;
         this.sessionCookieConfig = sessionCookieConfig;
+
     }
 
 
@@ -72,9 +80,19 @@ public class HazelcastSession implements Session {
         return this.delegate.isExpired();
     }
 
+    public void requestStarted(HttpServerExchange serverExchange) {
+       Boolean existing = serverExchange.getAttachment(FIRST_REQUEST_ACCESS);
+        if(existing == null) {
+            if (!invalid) {
+                this.delegate.setLastAccessedTime(System.currentTimeMillis());
+            }
+           serverExchange.putAttachment(FIRST_REQUEST_ACCESS, Boolean.TRUE);
+        }
+    }
+
     @Override
     public void requestDone(final HttpServerExchange serverExchange) {
-        this.delegate.requestDone(serverExchange);
+        //TODO
     }
 
     @Override
@@ -159,7 +177,7 @@ public class HazelcastSession implements Session {
 
 
     void invalidate(final HttpServerExchange exchange, SessionListener.SessionDestroyedReason reason) {
-        SessionImpl sess = (SessionImpl) hazelcastSessionManager.getSessions().remove(getId());
+        MapSession sess = (MapSession) hazelcastSessionManager.getSessions().remove(getId());
         if (sess == null) {
             if (reason == SessionListener.SessionDestroyedReason.INVALIDATED) {
                 throw UndertowMessages.MESSAGES.sessionAlreadyInvalidated();
@@ -182,7 +200,7 @@ public class HazelcastSession implements Session {
     @Override
     public String changeSessionId(final HttpServerExchange exchange, final SessionConfig config) {
         String oldId = getId();
-        String newId = this.delegate.changeSessionId(exchange, config);
+        String newId = this.delegate.changeSessionId();
         if(!this.delegate.isInvalid()) {
             hazelcastSessionManager.getSessions().put(newId, this.getDelegate());
             config.setSessionId(exchange, this.getId());
@@ -200,7 +218,7 @@ public class HazelcastSession implements Session {
         this.changed = false;
     }
 
-    public SessionImpl getDelegate() {
+    public MapSession getDelegate() {
         return this.delegate;
     }
 
