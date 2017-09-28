@@ -6,7 +6,7 @@ import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.IMap;
 import com.networknt.config.Config;
 import com.networknt.service.SingletonServiceFactory;
-import com.networknt.session.hazelcase.HazelcastSessionManager;
+import com.networknt.session.hazelcast.HazelcastSessionManager;
 import com.networknt.session.jdbc.JdbcSessionManager;
 import io.undertow.Handlers;
 import io.undertow.UndertowMessages;

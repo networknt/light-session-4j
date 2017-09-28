@@ -1,8 +1,7 @@
 
 
-package com.networknt.session.hazelcase;
+package com.networknt.session.hazelcast;
 
-import com.hazelcast.concurrent.atomiclong.AtomicLongProxy;
 import com.hazelcast.core.*;
 import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryEvictedListener;
@@ -22,13 +21,10 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.math.BigDecimal;
+import java.io.Serializable;
 import java.math.BigInteger;
-import java.math.MathContext;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A {@link SessionRepository} implementation that stores
@@ -52,7 +48,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  */
 public class HazelcastSessionManager implements
-		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager,
+		FindByIndexNameSessionRepository<HazelcastSession>, SessionManager, Serializable,
 		EntryAddedListener<String, Session>,
 		EntryEvictedListener<String, Session>,
 		EntryRemovedListener<String, Session> {

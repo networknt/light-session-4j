@@ -7,6 +7,7 @@ import io.undertow.server.session.*;
 import io.undertow.util.AttachmentKey;
 
 
+import java.io.Serializable;
 import java.util.Date;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,9 +17,9 @@ import java.util.concurrent.ConcurrentMap;
 /**
  * Created by chenga on 2017-09-22.
  */
-public class SessionImpl implements Session {
+public class SessionImpl implements Session, Serializable {
 
-    final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
+ //   final AttachmentKey<Boolean> FIRST_REQUEST_ACCESS = AttachmentKey.create(Boolean.class);
     final SessionManager sessionManager;
     final ConcurrentMap<String, Object> attributes = new ConcurrentHashMap<>();
     private volatile long lastAccessed;
@@ -60,13 +61,13 @@ public class SessionImpl implements Session {
     }
 
     public void requestStarted(HttpServerExchange serverExchange) {
-        Boolean existing = serverExchange.getAttachment(FIRST_REQUEST_ACCESS);
+    /*    Boolean existing = serverExchange.getAttachment(FIRST_REQUEST_ACCESS);
         if(existing == null) {
             if (!invalid) {
                 lastAccessed = System.currentTimeMillis();
             }
-            serverExchange.putAttachment(FIRST_REQUEST_ACCESS, Boolean.TRUE);
-        }
+           serverExchange.putAttachment(FIRST_REQUEST_ACCESS, Boolean.TRUE);
+        }*/
     }
 
     @Override

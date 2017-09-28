@@ -1,5 +1,5 @@
 
-package com.networknt.session.hazelcase;
+package com.networknt.session.hazelcast;
 
 import com.networknt.session.SessionRepository;
 import io.undertow.server.session.Session;

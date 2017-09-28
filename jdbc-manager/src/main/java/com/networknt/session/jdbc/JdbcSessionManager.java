@@ -182,7 +182,7 @@ public class JdbcSessionManager implements
 	}
 
 	public JdbcSession createSession() {
-		JdbcSession session = new JdbcSession(this, this.getConfig());
+		JdbcSession session = new JdbcSession(this);
 		if (this.defaultMaxInactiveInterval != null) {
 			session.setMaxInactiveInterval(this.defaultMaxInactiveInterval);
 		}
@@ -201,7 +201,7 @@ public class JdbcSessionManager implements
 			sessionID = sessionIdGenerator.createSessionId();
 		}
 
-		JdbcSession session = new JdbcSession(this, config, sessionID);
+		JdbcSession session = new JdbcSession(this, sessionID);
 
 		UndertowLogger.SESSION_LOGGER.debugf("Created session with id %s for exchange %s", sessionID, serverExchange);
 
@@ -333,6 +333,7 @@ public class JdbcSessionManager implements
 		return session;
 	}
 
+
 	@Override
 	public JdbcSession getSession(String id) {
 		return findById(id);
@@ -364,6 +365,15 @@ public class JdbcSessionManager implements
 			}
 		}
 		return null;
+	}
+
+
+	public void removeSession(final HttpServerExchange serverExchange, String id) {
+		deleteById(id);
+		if (serverExchange != null) {
+			getConfig().clearSession(serverExchange, id);
+		}
+
 	}
 
 	@Override
@@ -550,6 +560,18 @@ public class JdbcSessionManager implements
 		}
 	}
 
+	public void updateStatistics(JdbcSession session) {
+		long life = System.currentTimeMillis() - session.getCreationTime();
+		synchronized (this) {
+			sessionStatistics.setExpiredSessionCount(sessionStatistics.getExpiredSessionCount()+1);
+			sessionStatistics.setTotalSessionLifetime(sessionStatistics.getTotalSessionLifetime().add(BigInteger.valueOf(life)));
+
+			if(sessionStatistics.getLongestSessionLifetime() < life) {
+				sessionStatistics.setLongestSessionLifetime(life);
+			}
+		}
+
+	}
 
 	public String resolvePrincipal(Session session) {
 		String principalName = (String)session.getAttribute(PRINCIPAL_NAME_INDEX_NAME);
@@ -574,7 +596,7 @@ public class JdbcSessionManager implements
 			else {
 				SessionImpl delegate = new SessionImpl(this, rs.getString("SESSION_ID"), rs.getInt("MAX_INACTIVE_INTERVAL"), rs.getLong("CREATION_TIME"));
 				delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
-				session = new JdbcSession(delegate,  getConfig());
+				session = new JdbcSession(delegate);
 			}
 			String attributeName = rs.getString("ATTRIBUTE_NAME");
 			if (attributeName != null) {

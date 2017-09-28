@@ -1,9 +1,11 @@
 package com.networknt.session.jdbc;
 
 import com.networknt.session.SessionImpl;
+import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.session.Session;
 import io.undertow.server.session.SessionConfig;
+import io.undertow.server.session.SessionListener;
 import io.undertow.server.session.SessionManager;
 
 import java.util.HashMap;
@@ -21,28 +23,24 @@ public class JdbcSession implements Session {
     private boolean isNew;
     private boolean changed;
     private JdbcSessionManager jdbcSessionManager;
-    private SessionConfig sessionCookieConfig;
 
     private Map<String, Object> delta = new HashMap<>();
 
-    JdbcSession(JdbcSessionManager jdbcSessionManager,  SessionConfig sessionCookieConfig) {
+    JdbcSession(JdbcSessionManager jdbcSessionManager) {
             this.jdbcSessionManager = jdbcSessionManager;
-            this.sessionCookieConfig = sessionCookieConfig;
             this.delegate = new SessionImpl(jdbcSessionManager, jdbcSessionManager.getDefaultMaxInactiveInterval());
             this.isNew = true;
     }
 
-    JdbcSession(JdbcSessionManager jdbcSessionManager,  SessionConfig sessionCookieConfig, String sessionId) {
+    JdbcSession(JdbcSessionManager jdbcSessionManager,   String sessionId) {
         this.jdbcSessionManager = jdbcSessionManager;
-        this.sessionCookieConfig = sessionCookieConfig;
         this.delegate = new SessionImpl(jdbcSessionManager, sessionId, jdbcSessionManager.getDefaultMaxInactiveInterval());
         this.isNew = true;
     }
 
-    JdbcSession(SessionImpl delegate,  SessionConfig sessionCookieConfig) {
+    JdbcSession(SessionImpl delegate) {
             //this.primaryKey = primaryKey;
             this.delegate = delegate;
-            this.sessionCookieConfig = sessionCookieConfig;
     }
 
     public boolean isNew() {
@@ -157,9 +155,28 @@ public class JdbcSession implements Session {
 
     @Override
     public void invalidate(final HttpServerExchange exchange) {
-        //invalidate(exchange, SessionListener.SessionDestroyedReason.INVALIDATED);
+        invalidate(exchange, SessionListener.SessionDestroyedReason.INVALIDATED);
         if(exchange != null) {
             exchange.removeAttachment(jdbcSessionManager.NEW_SESSION);
+        }
+    }
+
+
+    void invalidate(final HttpServerExchange exchange, SessionListener.SessionDestroyedReason reason) {
+        Session sess = jdbcSessionManager.getSession(getId());
+        jdbcSessionManager.removeSession(exchange, getId());
+        if (sess == null) {
+            if (reason == SessionListener.SessionDestroyedReason.INVALIDATED) {
+                throw UndertowMessages.MESSAGES.sessionAlreadyInvalidated();
+            }
+            return;
+        }
+
+        jdbcSessionManager.getSessionListeners().sessionDestroyed(this, exchange, reason);
+        this.delegate.setInvalid(true);
+
+        if(jdbcSessionManager.isStatisticsEnabled()) {
+            jdbcSessionManager.updateStatistics(this);
         }
     }
 
