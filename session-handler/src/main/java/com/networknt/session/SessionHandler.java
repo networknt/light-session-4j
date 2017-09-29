@@ -3,9 +3,11 @@ package com.networknt.session;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.IMap;
 import com.networknt.config.Config;
+import com.networknt.handler.MiddlewareHandler;
 import com.networknt.service.SingletonServiceFactory;
 import com.networknt.session.hazelcast.HazelcastSessionManager;
 import com.networknt.session.jdbc.JdbcSessionManager;
+import com.networknt.utility.ModuleRegistry;
 import io.undertow.Handlers;
 import io.undertow.UndertowMessages;
 import io.undertow.server.ExchangeCompletionListener;
@@ -19,7 +21,7 @@ import io.undertow.server.session.SessionManager;
 import javax.sql.DataSource;
 
 
-public class SessionHandler implements HttpHandler {
+public class SessionHandler implements MiddlewareHandler {
 
     private volatile HttpHandler next = ResponseCodeHandler.HANDLE_404;
 
@@ -37,7 +39,6 @@ public class SessionHandler implements HttpHandler {
     public static SessionConfig config;
     static {
         config = (SessionConfig) Config.getInstance().getJsonObjectConfig(CONFIG_NAME, SessionConfig.class);
-
     }
 
 
@@ -66,15 +67,26 @@ public class SessionHandler implements HttpHandler {
 
     }
 
-
+    @Override
     public HttpHandler getNext() {
         return next;
     }
 
-    public SessionHandler setNext(final HttpHandler next) {
+    @Override
+    public MiddlewareHandler setNext(final HttpHandler next) {
         Handlers.handlerNotNull(next);
         this.next = next;
         return this;
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return config.isEnabled();
+    }
+
+    @Override
+    public void register() {
+        ModuleRegistry.registerModule(SessionHandler.class.getName(), Config.getInstance().getJsonMapConfigNoCache(CONFIG_NAME), null);
     }
 
     public SessionManager getSessionManager() {

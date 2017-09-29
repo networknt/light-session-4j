@@ -4,7 +4,7 @@ package com.networknt.session;
  * Created by gavin on 2017-09-27.
  */
 public class SessionConfig {
-
+    boolean enabled;
     String type;
     String deployName;
     int maxSize;
@@ -12,6 +12,15 @@ public class SessionConfig {
 
     public SessionConfig() {
     }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
     public String getType() {
         return type;
     }
