@@ -1,7 +1,7 @@
 ---
 # Session handler configuration
-
-type: HazelCast
+# Distributed session repository. Default to hazelcast. Other option is redis and jdbc
+type: hazelcast
 
 deployName: LIGHT-SESSION
 maxSize: 1000

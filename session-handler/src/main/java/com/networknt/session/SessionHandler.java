@@ -1,5 +1,3 @@
-
-
 package com.networknt.session;
 
 import com.hazelcast.core.Hazelcast;
@@ -26,7 +24,7 @@ public class SessionHandler implements HttpHandler {
 
     private volatile HttpHandler next = ResponseCodeHandler.HANDLE_404;
 
-    private static final String HAZELCAST_REPOSITORY = "HazelCast";
+    private static final String HAZELCAST_REPOSITORY = "hazelcast";
     private static final String JDBC_REPOSITORY = "jdbc";
     private static final String REDIS_REPOSITORY = "redis";
 
