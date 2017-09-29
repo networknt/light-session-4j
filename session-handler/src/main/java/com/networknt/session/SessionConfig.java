@@ -3,14 +3,14 @@ package com.networknt.session;
 /**
  * Created by gavin on 2017-09-27.
  */
-public class SessionManagerConfig {
+public class SessionConfig {
 
     String type;
     String deployName;
     int maxSize;
 
 
-    public SessionManagerConfig() {
+    public SessionConfig() {
     }
     public String getType() {
         return type;

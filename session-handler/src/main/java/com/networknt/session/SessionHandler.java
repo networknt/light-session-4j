@@ -14,7 +14,6 @@ import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.ResponseCodeHandler;
 import io.undertow.server.session.InMemorySessionManager;
 import io.undertow.server.session.Session;
-import io.undertow.server.session.SessionConfig;
 import io.undertow.server.session.SessionManager;
 
 import javax.sql.DataSource;
@@ -30,20 +29,20 @@ public class SessionHandler implements HttpHandler {
 
     private SessionManager sessionManager;
 
-    private SessionConfig sessionConfig;
+    private io.undertow.server.session.SessionConfig sessionConfig;
     private SessionStatistics sessionStatistics = SessionStatistics.getInstance() ;
     private IMap<String, MapSession> sessions = Hazelcast.newHazelcastInstance().getMap("sessions");
 
     public static final String CONFIG_NAME = "session";
-    public static SessionManagerConfig config;
+    public static SessionConfig config;
     static {
-        config = (SessionManagerConfig) Config.getInstance().getJsonObjectConfig(CONFIG_NAME, SessionManagerConfig.class);
+        config = (SessionConfig) Config.getInstance().getJsonObjectConfig(CONFIG_NAME, SessionConfig.class);
 
     }
 
 
     public SessionHandler() {
-        sessionConfig = (SessionConfig) SingletonServiceFactory.getBean(SessionConfig.class);
+        sessionConfig = (io.undertow.server.session.SessionConfig) SingletonServiceFactory.getBean(io.undertow.server.session.SessionConfig.class);
 
         if (HAZELCAST_REPOSITORY.equalsIgnoreCase(config.getType())) {
             this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
@@ -60,7 +59,7 @@ public class SessionHandler implements HttpHandler {
     @Override
     public void handleRequest(final HttpServerExchange exchange) throws Exception {
         exchange.putAttachment(SessionManager.ATTACHMENT_KEY, sessionManager);
-        exchange.putAttachment(SessionConfig.ATTACHMENT_KEY, sessionConfig);
+        exchange.putAttachment(io.undertow.server.session.SessionConfig.ATTACHMENT_KEY, sessionConfig);
         final UpdateLastAccessTimeListener handler = new UpdateLastAccessTimeListener(sessionConfig, sessionManager);
         exchange.addExchangeCompleteListener(handler);
         next.handleRequest(exchange);
@@ -92,10 +91,10 @@ public class SessionHandler implements HttpHandler {
 
     private static class UpdateLastAccessTimeListener implements ExchangeCompletionListener {
 
-        private final SessionConfig sessionConfig;
+        private final io.undertow.server.session.SessionConfig sessionConfig;
         private final SessionManager sessionManager;
 
-        private UpdateLastAccessTimeListener(final SessionConfig sessionConfig, final SessionManager sessionManager) {
+        private UpdateLastAccessTimeListener(final io.undertow.server.session.SessionConfig sessionConfig, final SessionManager sessionManager) {
             this.sessionConfig = sessionConfig;
             this.sessionManager = sessionManager;
         }
