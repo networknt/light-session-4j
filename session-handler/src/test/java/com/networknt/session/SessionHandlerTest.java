@@ -1,5 +1,7 @@
 package com.networknt.session;
 
+import com.networknt.client.Http2Client;
+import com.networknt.exception.ClientException;
 import com.networknt.session.hazelcast.HazelcastSession;
 import com.networknt.session.hazelcast.HazelcastSessionManager;
 import io.undertow.Handlers;
@@ -10,12 +12,10 @@ import io.undertow.client.ClientResponse;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.RoutingHandler;
-import io.undertow.server.session.Session;
 import io.undertow.server.session.SessionConfig;
 import io.undertow.server.session.SessionManager;
 import io.undertow.util.HttpString;
 import io.undertow.util.Methods;
-import org.apache.http.Header;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -28,9 +28,6 @@ import org.xnio.OptionMap;
 import java.net.URI;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
-
-import com.networknt.client.Http2Client;
-import com.networknt.exception.ClientException;
 
 /**
  * Created by gavin on 2017-09-29.
