@@ -143,7 +143,7 @@ public class HazelcastSessionManager implements
 	}
 
 	@Override
-	public Session createSession(final HttpServerExchange serverExchange, final SessionConfig config) {
+	public HazelcastSession createSession(final HttpServerExchange serverExchange, final SessionConfig config) {
 		if(maxSize>0 && sessions.size() >= maxSize) {
 			if(statisticsEnabled) {
 				sessionStatistics.setRejectedSessionCount(sessionStatistics.getRejectedSessionCount()+1);
@@ -215,7 +215,7 @@ public class HazelcastSessionManager implements
 	}
 
 	@Override
-	public Session getSession(final HttpServerExchange serverExchange, final SessionConfig config) {
+	public HazelcastSession getSession(final HttpServerExchange serverExchange, final SessionConfig config) {
 		if (serverExchange != null) {
 			HazelcastSession newSession = serverExchange.getAttachment(NEW_SESSION);
 			if(newSession != null) {
@@ -223,6 +223,9 @@ public class HazelcastSessionManager implements
 			}
 		}
 		String sessionId = config.findSessionId(serverExchange);
+		if (sessionId == null) {
+			return null;
+		}
 		HazelcastSession session =  getSession(sessionId);
 		if(session != null) {
 			session.requestStarted(serverExchange);

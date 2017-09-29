@@ -1,0 +1,12 @@
+---
+singletons:
+- javax.sql.DataSource:
+  - com.zaxxer.hikari.HikariDataSource:
+      DriverClassName: org.h2.jdbcx.JdbcDataSource
+      jdbcUrl: jdbc:h2:~/test
+      username: sa
+      password: sa
+- io.undertow.server.session.SessionConfig:
+  - io.undertow.server.session.SessionCookieConfig
+- com.networknt.session.SessionStatistics:
+  - com.networknt.session.SessionStatistics

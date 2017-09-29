@@ -228,6 +228,9 @@ public class HazelcastSession implements Session {
         }
     }
 
+    private void flush() {
+        hazelcastSessionManager.save(this);
+    }
 }
 
 

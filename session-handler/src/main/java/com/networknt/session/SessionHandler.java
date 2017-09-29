@@ -46,9 +46,6 @@ public class SessionHandler implements HttpHandler {
 
     public SessionHandler() {
         sessionConfig = (SessionConfig) SingletonServiceFactory.getBean(SessionConfig.class);
-        if (sessionManager == null) {
-            throw UndertowMessages.MESSAGES.sessionManagerMustNotBeNull();
-        }
 
         if (HAZELCAST_REPOSITORY.equalsIgnoreCase(config.getType())) {
             this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
