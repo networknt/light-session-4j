@@ -2,7 +2,7 @@
 package com.networknt.session.hazelcast;
 
 import com.networknt.session.SessionRepository;
-import io.undertow.server.session.Session;
+import com.networknt.session.Session;
 
 /**
  * Specifies when to write to the backing Hazelcast instance.
@@ -19,10 +19,9 @@ public enum HazelcastFlushMode {
 
 	/**
 	 * Writes to Hazelcast as soon as possible. For example
-	 * {createSession()} will write the session to Hazelcast.
+	 * {@link SessionRepository#createSession()} will write the session to Hazelcast.
 	 * Another example is that setting an attribute on the session will also write to
 	 * Hazelcast immediately.
 	 */
 	IMMEDIATE
-
 }

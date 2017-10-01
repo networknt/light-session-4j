@@ -1,19 +1,15 @@
 package com.networknt.session;
 
-
-
 import io.undertow.server.session.SecureRandomSessionIdGenerator;
-import io.undertow.server.session.Session;
-
 
 import java.io.Serializable;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * <p>
- * A {@link Session} implementation that is backed by a {@link Map}. The
+ * A {@link Session} implementation that is backed by a {@link java.util.Map}. The
  * defaults for the properties are:
  * </p>
  * <ul>
@@ -23,8 +19,14 @@ import java.util.concurrent.ConcurrentMap;
  * <li>maxInactiveInterval - 30 minutes</li>
  * </ul>
  *
+ * <p>
+ * This implementation has no synchronization, so it is best to use the copy constructor
+ * when working on multiple threads.
+ * </p>
+ *
+ * @author Gavin Chen, Steve Hu
  */
-public final class MapSession implements Serializable {
+public final class MapSession implements Session, Serializable {
     /**
      * Default {@link #setMaxInactiveInterval(int)} (30 minutes).
      */
@@ -32,10 +34,9 @@ public final class MapSession implements Serializable {
 
     private String id;
     private String originalId;
-    private ConcurrentMap<String, Object> sessionAttrs = new ConcurrentHashMap<>();
+    private Map<String, Object> sessionAttrs = new HashMap<>();
     private long creationTime  = System.currentTimeMillis();
     private long lastAccessedTime = creationTime;
-    private  boolean invalid = false;
 
     /**
      * Defaults to 30 minutes.
@@ -74,7 +75,7 @@ public final class MapSession implements Serializable {
         }
         this.id = session.getId();
         this.originalId = this.id;
-        this.sessionAttrs = new ConcurrentHashMap<>(
+        this.sessionAttrs = new HashMap<>(
                 session.getAttributeNames().size());
         for (String attrName : session.getAttributeNames()) {
             Object attrValue = session.getAttribute(attrName);
@@ -93,10 +94,12 @@ public final class MapSession implements Serializable {
         this.lastAccessedTime = lastAccessedTime;
     }
 
+    @Override
     public long getCreationTime() {
         return this.creationTime;
     }
 
+    @Override
     public String getId() {
         return this.id;
     }
@@ -109,74 +112,62 @@ public final class MapSession implements Serializable {
         this.originalId = originalId;
     }
 
+    @Override
     public String changeSessionId() {
         String changedId = generateId();
         setId(changedId);
         return changedId;
     }
 
+    @Override
     public long getLastAccessedTime() {
         return this.lastAccessedTime;
     }
 
+    @Override
     public void setMaxInactiveInterval(int interval) {
         this.maxInactiveInterval = interval;
     }
 
+    @Override
     public int getMaxInactiveInterval() {
         return this.maxInactiveInterval;
     }
 
+    @Override
     public boolean isExpired() {
-        return isExpired(new Date());
+        return isExpired(System.currentTimeMillis());
     }
 
-
-    boolean isExpired(Date now) {
+    boolean isExpired(long now) {
         if (this.maxInactiveInterval<0) {
             return false;
         }
-        return now.getTime() - this.lastAccessedTime >= this.maxInactiveInterval;
+        return now - this.lastAccessedTime >= this.maxInactiveInterval;
     }
 
-
+    @Override
     public Object getAttribute(String attributeName) {
         return  this.sessionAttrs.get(attributeName);
     }
 
+    @Override
     public Set<String> getAttributeNames() {
         return this.sessionAttrs.keySet();
     }
 
-
+    @Override
     public Object setAttribute(String attributeName, Object attributeValue) {
         if (attributeValue == null) {
             return removeAttribute(attributeName);
-        }
-        else {
-            final Object existing = this.sessionAttrs.put(attributeName, attributeValue);
-            if (existing == null) {
-                //	sessionManager.sessionListeners.attributeAdded(this, name, value);
-            } else {
-                //		sessionManager.sessionListeners.attributeUpdated(this, name, value, existing);
-            }
-            return existing;
-
+        } else {
+            return this.sessionAttrs.put(attributeName, attributeValue);
         }
     }
 
-
+    @Override
     public Object removeAttribute(String attributeName) {
         return this.sessionAttrs.remove(attributeName);
-    }
-
-    /**
-     * Sets the time that this {@link Session} was created. The default is when the
-     * {@link Session} was instantiated.
-     * @param creationTime the time that this {@link Session} was created.
-     */
-    public void setCreationTime(long creationTime) {
-        this.creationTime = creationTime;
     }
 
     /**
@@ -190,18 +181,12 @@ public final class MapSession implements Serializable {
         this.id = id;
     }
 
+    @Override
     public boolean equals(Object obj) {
         return obj instanceof Session && this.id.equals(((Session) obj).getId());
     }
 
-    public boolean isInvalid() {
-        return invalid;
-    }
-
-    public void setInvalid(boolean invalid) {
-        this.invalid = invalid;
-    }
-
+    @Override
     public int hashCode() {
         return this.id.hashCode();
     }
@@ -210,5 +195,6 @@ public final class MapSession implements Serializable {
         return new SecureRandomSessionIdGenerator().createSessionId();
     }
 
-    private static final long serialVersionUID = 7160779239673823561L;
+    // TODO change the Java serialization to something more efficient.
+    private static final long serialVersionUID = 1L;
 }

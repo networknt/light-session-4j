@@ -2,22 +2,17 @@ package com.networknt.session;
 
 import com.networknt.client.Http2Client;
 import com.networknt.exception.ClientException;
-import com.networknt.session.hazelcast.HazelcastSession;
-import com.networknt.session.hazelcast.HazelcastSessionManager;
 import io.undertow.Handlers;
 import io.undertow.Undertow;
 import io.undertow.UndertowOptions;
 import io.undertow.client.ClientConnection;
 import io.undertow.client.ClientRequest;
 import io.undertow.client.ClientResponse;
-import io.undertow.server.HttpHandler;
-import io.undertow.server.HttpServerExchange;
 import io.undertow.server.RoutingHandler;
-import io.undertow.server.session.SessionConfig;
-import io.undertow.server.session.SessionManager;
-import io.undertow.util.HttpString;
 import io.undertow.util.Methods;
-import org.junit.*;
+import org.junit.BeforeClass;
+import org.junit.ClassRule;
+import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xnio.IoUtils;
@@ -49,6 +44,7 @@ public class SessionHandlerDistributedTest {
     static final int httpsPort = server.getServerConfig().getHttpsPort();
     static final String url = enableHttp2 || enableHttps ? "https://localhost:" + httpsPort : "http://localhost:" + httpPort;
     public static final String COUNT = "count";
+    /*
     @BeforeClass
     public static void setUp() {
         HttpHandler handler = getTestHandler();
@@ -72,6 +68,7 @@ public class SessionHandlerDistributedTest {
                                }
 
         );
+
         handler = sessionHandler;
 
         if(server1 == null) {
@@ -118,7 +115,6 @@ public class SessionHandlerDistributedTest {
     }
 
 
-
     static RoutingHandler getTestHandler() {
         return Handlers.routing()
                 .add(Methods.GET, "/v2/pet/{petId}", exchange -> exchange.getResponseSender().send("test"));
@@ -161,4 +157,5 @@ public class SessionHandlerDistributedTest {
             System.out.println("session value:" + reference.get().getResponseHeaders().get(COUNT).get(0));
         }
     }
+    */
 }

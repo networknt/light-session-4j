@@ -5,8 +5,6 @@ import com.hazelcast.core.IMap;
 import com.networknt.config.Config;
 import com.networknt.handler.MiddlewareHandler;
 import com.networknt.service.SingletonServiceFactory;
-import com.networknt.session.hazelcast.HazelcastSessionManager;
-import com.networknt.session.jdbc.JdbcSessionManager;
 import com.networknt.utility.ModuleRegistry;
 import io.undertow.Handlers;
 import io.undertow.UndertowMessages;
@@ -14,11 +12,8 @@ import io.undertow.server.ExchangeCompletionListener;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.ResponseCodeHandler;
-import io.undertow.server.session.InMemorySessionManager;
 import io.undertow.server.session.Session;
 import io.undertow.server.session.SessionManager;
-
-import javax.sql.DataSource;
 
 
 public class SessionHandler implements MiddlewareHandler {
@@ -32,7 +27,6 @@ public class SessionHandler implements MiddlewareHandler {
     private SessionManager sessionManager;
 
     private io.undertow.server.session.SessionConfig sessionConfig;
-    private SessionStatistics sessionStatistics = SessionStatistics.getInstance() ;
     private IMap<String, MapSession> sessions = Hazelcast.newHazelcastInstance().getMap("sessions");
 
     public static final String CONFIG_NAME = "session";
@@ -44,7 +38,7 @@ public class SessionHandler implements MiddlewareHandler {
 
     public SessionHandler() {
         sessionConfig = (io.undertow.server.session.SessionConfig) SingletonServiceFactory.getBean(io.undertow.server.session.SessionConfig.class);
-
+        /*
         if (HAZELCAST_REPOSITORY.equalsIgnoreCase(config.getType())) {
             this.sessionManager = new HazelcastSessionManager(sessions,  config.getDeployName(), config.getMaxSize(), sessionStatistics);
         } else if (JDBC_REPOSITORY.equalsIgnoreCase(config.getType()) ) {
@@ -55,6 +49,7 @@ public class SessionHandler implements MiddlewareHandler {
         } else {
             this.sessionManager = new InMemorySessionManager(config.getDeployName(), config.getMaxSize(), true);
         }
+        */
     }
 
     @Override

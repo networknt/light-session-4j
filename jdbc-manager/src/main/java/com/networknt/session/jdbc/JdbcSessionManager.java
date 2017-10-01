@@ -1,31 +1,7 @@
 
 package com.networknt.session.jdbc;
 
-import com.networknt.session.FindByIndexNameSessionRepository;
-import com.networknt.session.SessionImpl;
 import com.networknt.session.SessionRepository;
-import com.networknt.session.SessionStatistics;
-import com.networknt.session.jdbc.serializer.SerializationFailedException;
-import com.networknt.session.jdbc.serializer.ValueBytesConverter;
-import io.undertow.UndertowLogger;
-import io.undertow.UndertowMessages;
-import io.undertow.server.HttpServerExchange;
-import io.undertow.server.session.*;
-import io.undertow.util.AttachmentKey;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.sql.DataSource;
-import java.io.ByteArrayInputStream;
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.math.MathContext;
-import java.sql.*;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A {@link SessionRepository} implementation that uses
@@ -76,7 +52,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * CREATE INDEX SPRING_SESSION_ATTRIBUTES_IX1 ON SPRING_SESSION_ATTRIBUTES (SESSION_PRIMARY_ID);
  * </pre>
  */
-public class JdbcSessionManager implements
+public class JdbcSessionManager {} /*implements
 		FindByIndexNameSessionRepository<JdbcSession>, SessionManager{
 
 
@@ -534,12 +510,6 @@ public class JdbcSessionManager implements
 		return null;
 	}
 
-	/**
-	 * Set the maximum inactive interval in seconds between requests before newly created
-	 * sessions will be invalidated. A negative time indicates that the session will never
-	 * timeout. The default is 1800 (30 minutes).
-	 * @param defaultMaxInactiveInterval the maximum inactive interval in seconds
-	 */
 	public void setDefaultMaxInactiveInterval(Integer defaultMaxInactiveInterval) {
 		this.defaultMaxInactiveInterval = defaultMaxInactiveInterval;
 	}
@@ -637,4 +607,4 @@ public class JdbcSessionManager implements
 	}
 
 
-}
+} */

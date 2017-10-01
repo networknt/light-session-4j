@@ -1,21 +1,13 @@
 package com.networknt.session.jdbc;
 
 import com.networknt.service.SingletonServiceFactory;
-import com.networknt.session.SessionStatistics;
-import io.undertow.server.session.SecureRandomSessionIdGenerator;
-import io.undertow.server.session.Session;
-import io.undertow.server.session.SessionConfig;
 import org.h2.tools.RunScript;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
 
 import javax.sql.DataSource;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.Map;
 
 /**
  * Created by chenga on 2017-09-28.
@@ -42,6 +34,7 @@ public class JdbcSessionManagerTest {
         }
     }
 
+    /*
     private static SessionConfig sessionConfig = (SessionConfig)SingletonServiceFactory.getBean(SessionConfig.class);
     private static SessionStatistics sessionStatistics = (SessionStatistics)SingletonServiceFactory.getBean(SessionStatistics.class);
     private static JdbcSessionManager jdbcSessionManager = new JdbcSessionManager(ds, sessionConfig, "light-session", sessionStatistics);
@@ -69,4 +62,5 @@ public class JdbcSessionManagerTest {
         Assert.assertNotNull(jdbcSessionManager.getSession(session.getId()));
 
     }
+    */
 }

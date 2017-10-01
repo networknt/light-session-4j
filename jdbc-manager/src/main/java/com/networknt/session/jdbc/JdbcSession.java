@@ -1,6 +1,5 @@
 package com.networknt.session.jdbc;
 
-import com.networknt.session.SessionImpl;
 import io.undertow.UndertowMessages;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.session.Session;
@@ -15,7 +14,9 @@ import java.util.Set;
 /**
  * Created by gavin on 2017-09-22.
  */
-public class JdbcSession implements Session {
+public class JdbcSession  {}
+/*
+implements Session {
 
 
     private final SessionImpl delegate;
@@ -180,4 +181,4 @@ public class JdbcSession implements Session {
         }
     }
 
-}
+}*/
