@@ -1,6 +1,5 @@
 package com.networknt.session;
 
-import io.undertow.UndertowMessages;
 import io.undertow.server.session.SessionIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,7 +63,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
             deleteById(saved.getId());
             return null;
         }
-        return new MapSession(saved);
+        return (MapSession)saved;
     }
 
     @Override
@@ -89,6 +88,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
         }
 
         MapSession result = new MapSession(sessionId);
+        sessions.put(sessionId, result);
         if (this.defaultMaxInactiveInterval != 0) {
             result.setMaxInactiveInterval(this.defaultMaxInactiveInterval);
         }

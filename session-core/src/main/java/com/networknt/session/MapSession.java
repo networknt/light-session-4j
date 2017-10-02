@@ -143,7 +143,7 @@ public final class MapSession implements Session, Serializable {
         if (this.maxInactiveInterval<0) {
             return false;
         }
-        return now - this.lastAccessedTime >= this.maxInactiveInterval;
+        return now - this.lastAccessedTime >= this.maxInactiveInterval * 1000L;
     }
 
     @Override

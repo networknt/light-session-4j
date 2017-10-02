@@ -77,6 +77,7 @@
         <version.redis>2.9.0</version.redis>
         <version.hikaricp>2.7.1</version.hikaricp>
         <version.h2>1.4.196</version.h2>
+        <version.httpclient>4.2.6</version.httpclient>
         <versions.maven-version>2.4</versions.maven-version>
         <argLine>-Xmx512m -XX:MaxPermSize=256m</argLine>
     </properties>
@@ -139,11 +140,6 @@
                 <artifactId>client</artifactId>
                 <version>${version.light-4j}</version>
             </dependency>
-            <dependency>
-                <groupId>com.networknt</groupId>
-                <artifactId>server</artifactId>
-                <version>${version.light-4j}</version>
-            </dependency>
             <!-- External dependencies -->
 
             <dependency>
@@ -181,6 +177,12 @@
                 <artifactId>jedis</artifactId>
                 <version>${version.redis}</version>
             </dependency>
+            <dependency>
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>${version.snakeyaml}</version>
+            </dependency>
+
             <!-- Test dependencies -->
             <dependency>
                 <groupId>ch.qos.logback</groupId>
@@ -194,6 +196,12 @@
                 <version>${version.hikaricp}</version>
             </dependency>
             <dependency>
+                <groupId>com.hazelcast</groupId>
+                <artifactId>hazelcast</artifactId>
+                <version>${version.hazelcast}</version>
+            </dependency>
+
+            <dependency>
                 <groupId>junit</groupId>
                 <artifactId>junit</artifactId>
                 <version>${version.junit}</version>
@@ -205,9 +213,22 @@
                 <scope>test</scope>
             </dependency>
             <dependency>
-                <groupId>com.hazelcast</groupId>
-                <artifactId>hazelcast</artifactId>
-                <version>${version.hazelcast}</version>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpclient</artifactId>
+                <version>${version.httpclient}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.networknt</groupId>
+                <artifactId>server</artifactId>
+                <version>${version.light-4j}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.networknt</groupId>
+                <artifactId>sevice</artifactId>
+                <version>${version.light-4j}</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
