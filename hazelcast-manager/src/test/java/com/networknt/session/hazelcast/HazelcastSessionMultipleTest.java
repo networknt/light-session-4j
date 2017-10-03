@@ -21,39 +21,55 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * Created by gavin on 2017-09-27.
- */
-public class HazelCastSessionManagerTest {
-
-    static final Logger logger = LoggerFactory.getLogger(HazelCastSessionManagerTest.class);
+public class HazelcastSessionMultipleTest {
+    static final Logger logger = LoggerFactory.getLogger(HazelcastSessionMultipleTest.class);
     public static final String COUNT = "count";
 
-    static Undertow server = null;
+    static Undertow server1 = null;
+    static Undertow server2 = null;
 
     @BeforeClass
     public static void setUp() {
-        if(server == null) {
-            logger.info("starting server");
+        if(server1 == null) {
+            logger.info("starting server1");
             HttpHandler handler = getTestHandler();
-            server = Undertow.builder()
-                    .addHttpListener(8080, "localhost")
+            server1 = Undertow.builder()
+                    .addHttpListener(8081, "localhost")
                     .setHandler(handler)
                     .build();
-            server.start();
+            server1.start();
         }
+        if(server2 == null) {
+            logger.info("starting server2");
+            HttpHandler handler = getTestHandler();
+            server2 = Undertow.builder()
+                    .addHttpListener(8082, "localhost")
+                    .setHandler(handler)
+                    .build();
+            server2.start();
+        }
+
     }
 
     @AfterClass
     public static void tearDown() throws Exception {
-        if(server != null) {
+        if(server1 != null) {
             try {
                 Thread.sleep(100);
             } catch (InterruptedException ignored) {
 
             }
-            server.stop();
-            logger.info("The server is stopped.");
+            server1.stop();
+            logger.info("The server1 is stopped.");
+        }
+        if(server2 != null) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ignored) {
+
+            }
+            server2.stop();
+            logger.info("The server2 is stopped.");
         }
     }
 
@@ -79,28 +95,26 @@ public class HazelCastSessionManagerTest {
         TestHttpClient client = new TestHttpClient();
         client.setCookieStore(new BasicCookieStore());
         try {
-            HttpGet get = new HttpGet("http://localhost:8080/get");
+            HttpGet get = new HttpGet("http://localhost:8081/get");
             HttpResponse result = client.execute(get);
             Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             Header[] header = result.getHeaders(COUNT);
             Assert.assertEquals("0", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8080/get");
+            get = new HttpGet("http://localhost:8082/get");
             result = client.execute(get);
             Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             header = result.getHeaders(COUNT);
             Assert.assertEquals("1", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8080/get");
+            get = new HttpGet("http://localhost:8081/get");
             result = client.execute(get);
             Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             header = result.getHeaders(COUNT);
             Assert.assertEquals("2", header[0].getValue());
-
-
         } finally {
             client.getConnectionManager().shutdown();
         }
