@@ -177,11 +177,6 @@
                 <artifactId>jedis</artifactId>
                 <version>${version.redis}</version>
             </dependency>
-            <dependency>
-                <groupId>org.yaml</groupId>
-                <artifactId>snakeyaml</artifactId>
-                <version>${version.snakeyaml}</version>
-            </dependency>
 
             <!-- Test dependencies -->
             <dependency>
