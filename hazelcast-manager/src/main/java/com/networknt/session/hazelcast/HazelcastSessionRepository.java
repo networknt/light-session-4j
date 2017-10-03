@@ -1,5 +1,8 @@
 package com.networknt.session.hazelcast;
 
+import com.hazelcast.config.Config;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.IMap;
 import com.networknt.session.MapSession;
 import com.networknt.session.Session;
@@ -7,6 +10,7 @@ import com.networknt.session.SessionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -43,7 +47,7 @@ public class HazelcastSessionRepository implements SessionRepository<HazelcastSe
 
     private final IMap<String, MapSession> sessions;
 
-    private HazelcastFlushMode hazelcastFlushMode = HazelcastFlushMode.ON_SAVE;
+    private HazelcastFlushMode hazelcastFlushMode = HazelcastFlushMode.IMMEDIATE;
 
     /**
      * If non-null, this value is used to override
@@ -51,8 +55,10 @@ public class HazelcastSessionRepository implements SessionRepository<HazelcastSe
      */
     private int defaultMaxInactiveInterval;
 
-    public HazelcastSessionRepository(IMap<String, MapSession> sessions) {
-        this.sessions = sessions;
+    public HazelcastSessionRepository() {
+        Config config = new Config();
+        HazelcastInstance hazelcastInstance = Hazelcast.newHazelcastInstance(config);
+        this.sessions = hazelcastInstance.getMap("light:session:sessions");
     }
 
     /**
