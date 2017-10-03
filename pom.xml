@@ -23,7 +23,7 @@
     <packaging>pom</packaging>
     <name>Parent POM</name>
     <description>Light 4J Distributed Session Handler and Managers</description>
-    <url>https://github.com/networknt/light-session</url>
+    <url>https://github.com/networknt/light-session-4j</url>
 
     <developers>
         <developer>
@@ -35,7 +35,7 @@
 
     <issueManagement>
         <system>github</system>
-        <url>https://github.com/networknt/light-session/issues</url>
+        <url>https://github.com/networknt/light-session-4j/issues</url>
     </issueManagement>
 
     <licenses>
@@ -47,9 +47,9 @@
     </licenses>
 
     <scm>
-        <connection>scm:git://github.com:networknt/light-session.git</connection>
-        <developerConnection>scm:git://github.com:networknt/light-session.git</developerConnection>
-        <url>https://github.com:networknt/light-session.git</url>
+        <connection>scm:git://github.com:networknt/light-session-4j.git</connection>
+        <developerConnection>scm:git://github.com:networknt/light-session-4j.git</developerConnection>
+        <url>https://github.com:networknt/light-session-4j.git</url>
     </scm>
 
     <distributionManagement>
