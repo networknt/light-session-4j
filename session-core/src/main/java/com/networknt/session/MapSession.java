@@ -94,6 +94,10 @@ public final class MapSession implements Session, Serializable {
         this.lastAccessedTime = lastAccessedTime;
     }
 
+    public void setCreationTime(long creationTime) {
+        this.creationTime = creationTime;
+    }
+
     @Override
     public long getCreationTime() {
         return this.creationTime;

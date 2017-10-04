@@ -1,7 +1,13 @@
 package com.networknt.session.jdbc;
 
 import com.networknt.service.SingletonServiceFactory;
+import com.networknt.session.Session;
+import com.networknt.session.SessionRepository;
+import io.undertow.server.session.SessionConfig;
 import org.h2.tools.RunScript;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 import javax.sql.DataSource;
 import java.io.InputStream;
@@ -12,16 +18,16 @@ import java.sql.SQLException;
 /**
  * Created by chenga on 2017-09-28.
  */
-public class JdbcSessionManagerTest {
+public class JdbcSessionRepositoryTest {
 
     public static DataSource ds;
-    private static  JdbcSession session;
+    private static Session session;
     static {
         ds = (DataSource) SingletonServiceFactory.getBean(DataSource.class);
         try (Connection connection = ds.getConnection()) {
             // Runscript doesn't work need to execute batch here.
             String schemaResourceName = "/create_session.sql";
-            InputStream in = JdbcSessionManagerTest.class.getResourceAsStream(schemaResourceName);
+            InputStream in = JdbcSessionRepositoryTest.class.getResourceAsStream(schemaResourceName);
 
             if (in == null) {
                 throw new RuntimeException("Failed to load resource: " + schemaResourceName);
@@ -34,33 +40,30 @@ public class JdbcSessionManagerTest {
         }
     }
 
-    /*
+
     private static SessionConfig sessionConfig = (SessionConfig)SingletonServiceFactory.getBean(SessionConfig.class);
-    private static SessionStatistics sessionStatistics = (SessionStatistics)SingletonServiceFactory.getBean(SessionStatistics.class);
-    private static JdbcSessionManager jdbcSessionManager = new JdbcSessionManager(ds, sessionConfig, "light-session", sessionStatistics);
+    private static SessionRepository sessionRepository = (SessionRepository)SingletonServiceFactory.getBean(SessionRepository.class);
+
 
     @BeforeClass
     public static void setUp() {
-        jdbcSessionManager.start();
-        SecureRandomSessionIdGenerator sessionIdGenerator = new SecureRandomSessionIdGenerator();
-        session = new JdbcSession(jdbcSessionManager, sessionIdGenerator.createSessionId());
 
     }
 
     @Test
     public void testSave() {
-        jdbcSessionManager.save(session);
-
-        Assert.assertTrue(jdbcSessionManager.getSessions().size()>0);
+        session = sessionRepository.createSession();
 
     }
 
     @Test
     public void testGetSession() {
-        jdbcSessionManager.save(session);
+        session = sessionRepository.createSession();
 
-        Assert.assertNotNull(jdbcSessionManager.getSession(session.getId()));
+        Assert.assertNotNull(sessionRepository.findById(session.getId()));
+
+        System.out.println(sessionRepository.findById(session.getId()).getLastAccessedTime());
 
     }
-    */
+
 }

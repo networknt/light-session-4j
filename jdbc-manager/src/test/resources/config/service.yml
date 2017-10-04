@@ -8,5 +8,7 @@ singletons:
       password: sa
 - io.undertow.server.session.SessionConfig:
   - io.undertow.server.session.SessionCookieConfig
-- com.networknt.session.SessionStatistics:
-  - com.networknt.session.SessionStatistics
+- com.networknt.session.SessionRepository:
+  - com.networknt.session.jdbc.JdbcSessionRepository
+- com.networknt.session.SessionManager:
+  - com.networknt.session.jdbc.JdbcSessionManager

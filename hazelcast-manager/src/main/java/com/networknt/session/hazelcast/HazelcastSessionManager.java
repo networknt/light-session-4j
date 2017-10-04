@@ -1,5 +1,6 @@
 package com.networknt.session.hazelcast;
 
+import com.networknt.session.MapSession;
 import com.networknt.session.Session;
 import com.networknt.session.SessionManager;
 import com.networknt.session.SessionRepository;
@@ -50,5 +51,22 @@ public class HazelcastSessionManager implements SessionManager {
             return null;
         }
         return sessionRepository.findById(sessionId);
+    }
+
+    @Override
+    public Session removeSession(HttpServerExchange serverExchange) {
+        if (serverExchange != null) {
+            String sessionId = sessionConfig.findSessionId(serverExchange);
+            Session oldSession =  serverExchange.removeAttachment(NEW_SESSION);
+            removeSession(sessionId);
+            return oldSession;
+        }
+
+        return null;
+    }
+
+    @Override
+    public void removeSession(String sessionId) {
+        sessionRepository.deleteById(sessionId);
     }
 }

@@ -48,4 +48,21 @@ public class MapSessionManager implements SessionManager {
         }
         return sessionRepository.findById(sessionId);
     }
+
+    @Override
+    public Session removeSession(HttpServerExchange serverExchange) {
+        if (serverExchange != null) {
+            String sessionId = sessionConfig.findSessionId(serverExchange);
+            MapSession oldSession =  serverExchange.removeAttachment(NEW_SESSION);
+             removeSession(sessionId);
+             return oldSession;
+        }
+
+        return null;
+    }
+
+    @Override
+    public void removeSession(String sessionId) {
+        sessionRepository.deleteById(sessionId);
+    }
 }

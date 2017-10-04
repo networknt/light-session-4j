@@ -94,4 +94,8 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
         }
         return result;
     }
+
+    public Map<String, Session> getSessions() {
+        return sessions;
+    }
 }

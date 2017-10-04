@@ -1,5 +1,7 @@
 package com.networknt.session;
 
+import java.util.Map;
+
 /**
  * A repository interface for managing {@link Session} instances.
  *
@@ -53,4 +55,5 @@ public interface SessionRepository<S extends Session> {
 	 * @param id the {@link com.networknt.session.Session#getId()} to delete
 	 */
 	void deleteById(String id);
+
 }

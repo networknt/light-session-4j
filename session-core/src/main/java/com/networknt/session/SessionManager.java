@@ -54,4 +54,16 @@ public interface SessionManager {
      */
     Session getSession(final String sessionId);
 
+    /**
+     * @return An IoFuture that can be used to remove the session from serverExchange, or an IoFuture that will return null if not found
+     */
+    Session removeSession(final HttpServerExchange serverExchange);
+
+    /**
+     * Remove a session with the given session id
+     *
+     * @param sessionId The session ID
+     */
+    void removeSession(final String sessionId);
+
 }

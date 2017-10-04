@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -117,6 +118,11 @@ public class HazelcastSessionRepository implements SessionRepository<HazelcastSe
     @Override
     public void deleteById(String id) {
         this.sessions.remove(id);
+    }
+
+
+    public Map<String, MapSession> getSessions() {
+        return sessions;
     }
 
     /**
