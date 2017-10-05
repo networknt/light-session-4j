@@ -78,6 +78,11 @@ public class JdbcSessionRepository implements
 			"UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
 					"WHERE SESSION_ID = ?";
 
+	private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
+			"UPDATE light_session SET  LAST_ACCESS_TIME = ? " +
+					"WHERE SESSION_ID = ?";
+
+
 	private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
 			"UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
 					"WHERE SESSION_ID = ? " +
@@ -316,7 +321,22 @@ public class JdbcSessionRepository implements
 		}
 	}
 
+	public void updateSessionLastAccessTime(final String id) {
+		int count= 0;
+		try (final Connection connection = dataSource.getConnection()) {
+			try (PreparedStatement psAtt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
+				psAtt.setLong(1, System.currentTimeMillis());
+				psAtt.setString(2, id);
+				psAtt.executeUpdate();
+			}
+		} catch (SQLException e) {
+			logger.error("SqlException:", e);
+		}
 
+		if (logger.isDebugEnabled()) {
+			logger.debug("session access change " + id + " to current time");
+		}
+	}
 
 	private String getQuery(String base) {
 		return base;
@@ -478,9 +498,11 @@ public class JdbcSessionRepository implements
 			return this.delegate.getCreationTime();
 		}
 
+		@Override
 		public void setLastAccessedTime(long lastAccessedTime) {
 			this.delegate.setLastAccessedTime(lastAccessedTime);
 			this.changed = true;
+			JdbcSessionRepository.this.updateSessionLastAccessTime(this.getId());
 		}
 
 		public long getLastAccessedTime() {

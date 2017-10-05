@@ -62,7 +62,11 @@ public class JdbcSessionManager implements SessionManager {
 			}
 		}
 		String sessionId = sessionConfig.findSessionId(serverExchange);
-		return getSession(sessionId);
+		Session session = getSession(sessionId);
+		if (session == null ) {
+			sessionConfig.clearSession(serverExchange, sessionId);
+		}
+		return session;
 	}
 
 	@Override
@@ -70,8 +74,14 @@ public class JdbcSessionManager implements SessionManager {
 		if (sessionId == null) {
 			return null;
 		}
-		return sessionRepository.findById(sessionId);
-	}
+		Session session = sessionRepository.findById(sessionId);
+		if (session!=null && !session.isExpired()) {
+			session.setLastAccessedTime(System.currentTimeMillis());
+
+			return session;
+		}
+		return null;
+}
 
 	@Override
 	public Session removeSession(HttpServerExchange serverExchange) {
