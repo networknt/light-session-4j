@@ -6,6 +6,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 /**
  * A {@link SessionRepository} backed by a {@link java.util.Map} and that uses a
@@ -24,8 +28,15 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
     private int defaultMaxInactiveInterval;
     private SessionIdGenerator sessionIdGenerator;
 
-    private final Map<String, Session> sessions = new HashMap<>();
-
+  //  private final Map<String, Session> sessions = new HashMap<>();
+    private static Integer expiredInMinutes = 10 * 60;
+    static Cache<String, Session> sessions;
+    static {
+        sessions = Caffeine.newBuilder()
+                // assuming that the clock screw time is less than 5 minutes
+                .expireAfterWrite(expiredInMinutes, TimeUnit.MINUTES)
+                .build();
+    }
     /**
      * Creates a new instance backed by the provided {@link java.util.Map}.
      *
@@ -47,7 +58,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
     @Override
     public void save(MapSession session) {
         if (!session.getId().equals(session.getOriginalId())) {
-            this.sessions.remove(session.getOriginalId());
+            this.sessions.invalidate(session.getOriginalId());
             session.setOriginalId(session.getId());
         }
         this.sessions.put(session.getId(), new MapSession(session));
@@ -55,7 +66,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
 
     @Override
     public MapSession findById(String id) {
-        Session saved = this.sessions.get(id);
+        Session saved = this.sessions.getIfPresent(id);
         if (saved == null) {
             return null;
         }
@@ -68,7 +79,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
 
     @Override
     public void deleteById(String id) {
-        this.sessions.remove(id);
+        this.sessions.invalidate(id);
     }
 
     @Override
@@ -77,7 +88,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
         int count = 0;
         while (sessionId == null) {
             sessionId = sessionIdGenerator.createSessionId();
-            if(sessions.containsKey(sessionId)) {
+            if(sessions.getIfPresent(sessionId)!=null) {
                 sessionId = null;
             }
             if(count++ == 100) {
@@ -96,6 +107,6 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
     }
 
     public Map<String, Session> getSessions() {
-        return sessions;
+        return sessions.asMap();
     }
 }
