@@ -1,8 +1,6 @@
 
 package com.networknt.session.redis;
 
-import io.undertow.server.session.Session;
-import com.networknt.session.SessionRepository;
 /**
  * Specifies when to write to the backing Redis instance.
  *

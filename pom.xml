@@ -74,7 +74,7 @@
         <version.undertow>1.4.20.Final</version.undertow>
         <version.hazelcast>3.6.8</version.hazelcast>
         <version.snakeyaml>1.18</version.snakeyaml>
-        <version.redis>2.9.0</version.redis>
+        <version.redisson>3.5.4</version.redisson>
         <version.hikaricp>2.7.1</version.hikaricp>
         <version.h2>1.4.196</version.h2>
         <version.httpclient>4.2.6</version.httpclient>
@@ -174,9 +174,9 @@
                 <version>${version.snakeyaml}</version>
             </dependency>
             <dependency>
-                <groupId>redis.clients</groupId>
-                <artifactId>jedis</artifactId>
-                <version>${version.redis}</version>
+                <groupId>org.redisson</groupId>
+                <artifactId>redisson</artifactId>
+                <version>${version.redisson}</version>
             </dependency>
 
             <!-- Test dependencies -->
