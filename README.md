@@ -8,17 +8,19 @@ Light-session provide different types of repository for distributed session mana
 
 ## Project module:
 
-session-core           core components and interfaces for the session management. It should be included any type of repository.
+session-core           --- core components and interfaces for the session management. It should be included any type of repository.
 
-hazelcast-mananger     use hazelcast as repository for session management. Session will be persisted in the hazelcast distributed cache repository.
+hazelcast-mananger     --- use hazelcast as repository for session management. Session will be persisted in the hazelcast distributed cache repository.
 
-jdbc-manager           use RDBMS database as repository for session management. Session will be persisted in the database tables.
+jdbc-manager           --- use RDBMS database as repository for session management. Session will be persisted in the database tables.
 
-redis-manager          use redis as repository for session management. Session will be persisted in the redis in-memory data structure store.
+redis-manager          --- use redis as repository for session management. Session will be persisted in the redis in-memory data structure store.
 
 
 
-## For JDBC manager, system provide two set of DDL script, one for Oracle, another for postgres. User need create the tables in the database before use the session management:
+## JDBC manager
+
+System provide two set of DDL script, one for Oracle, another for postgres. User need create the tables in the database before use the session management:
 
 Below is the sample for the script:
 
@@ -50,7 +52,9 @@ DROP table IF EXISTS light_session_attributes;
 
 
 
-## For redis session manager, user need start redis server before build and test the application"
+## Redis session manager
+
+User need start redis server before build and test the application
 
 ## Start Redis docker image:
 
