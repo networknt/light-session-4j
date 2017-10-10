@@ -24,7 +24,7 @@ System provide two set of DDL script, one for Oracle, another for postgres. User
 
 Below is the sample for the script:
 
-
+```
 DROP table IF EXISTS light_session;
 DROP table IF EXISTS light_session_attributes;
 
@@ -48,7 +48,7 @@ DROP table IF EXISTS light_session_attributes;
    attribute_bytes BYTEA,
    PRIMARY KEY(session_id, attribute_name)
   );
-
+```
 
 
 
