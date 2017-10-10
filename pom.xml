@@ -89,7 +89,6 @@
         <module>hazelcast-manager</module>
         <module>redis-manager</module>
         <module>jdbc-manager</module>
-        <module>session-handler</module>
     </modules>
 
     <dependencyManagement>
@@ -143,6 +142,11 @@
             </dependency>
             <!-- External dependencies -->
 
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${version.jackson}</version>
+            </dependency>
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>

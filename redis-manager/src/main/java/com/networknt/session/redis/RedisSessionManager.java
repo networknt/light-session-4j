@@ -14,11 +14,11 @@ import java.util.Objects;
 public class RedisSessionManager implements SessionManager {
 
 
-    private final AttachmentKey<RedisessionRepository.RedisSession> NEW_SESSION = AttachmentKey.create(RedisessionRepository.RedisSession.class);
+    private final AttachmentKey<RedisSessionRepository.RedisSession> NEW_SESSION = AttachmentKey.create(RedisSessionRepository.RedisSession.class);
 
     private SessionConfig sessionConfig;
     private SessionRepository sessionRepository;
-	public static final String DEPLOY_NAME = "JDBC-SESSION";
+	public static final String DEPLOY_NAME = "REDIS-SESSION";
 
     public RedisSessionManager(SessionConfig sessionConfig, SessionRepository sessionRepository){
 		Objects.requireNonNull(sessionConfig);
@@ -39,7 +39,7 @@ public class RedisSessionManager implements SessionManager {
 
 	//	String sessionID = sessionConfig.findSessionId(serverExchange);
 
-		final RedisessionRepository.RedisSession session = (RedisessionRepository.RedisSession)sessionRepository.createSession();
+		final RedisSessionRepository.RedisSession session = (RedisSessionRepository.RedisSession)sessionRepository.createSession();
 		sessionConfig.setSessionId(serverExchange, session.getId());
 		serverExchange.putAttachment(NEW_SESSION, session);
 		return session;
@@ -56,7 +56,7 @@ public class RedisSessionManager implements SessionManager {
 	@Override
 	public Session getSession(final HttpServerExchange serverExchange) {
 		if (serverExchange != null) {
-			RedisessionRepository.RedisSession newSession = serverExchange.getAttachment(NEW_SESSION);
+			RedisSessionRepository.RedisSession newSession = serverExchange.getAttachment(NEW_SESSION);
 			if (newSession != null) {
 				return newSession;
 			}

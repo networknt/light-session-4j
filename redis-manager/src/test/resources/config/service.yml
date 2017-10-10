@@ -1,0 +1,10 @@
+# singleton service factory configuration
+singletons:
+- io.undertow.server.session.SessionConfig:
+  - io.undertow.server.session.SessionCookieConfig
+- io.undertow.server.session.SessionIdGenerator:
+  - io.undertow.server.session.SecureRandomSessionIdGenerator
+- com.networknt.session.SessionRepository:
+  - com.networknt.session.redis.RedisSessionRepository
+- com.networknt.session.SessionManager:
+  - com.networknt.session.redis.RedisSessionManager

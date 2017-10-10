@@ -1,16 +1,25 @@
 package com.networknt.session.redis;
 
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.networknt.session.MapSession;
 import com.networknt.session.Session;
 import com.networknt.session.SessionRepository;
 import org.redisson.Redisson;
 import org.redisson.api.RMap;
 import org.redisson.api.RedissonClient;
+import org.redisson.codec.SerializationCodec;
 import org.redisson.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.sql.DataSource;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -21,9 +30,9 @@ import java.util.Set;
  * sessions in Redis repository.
 
  */
-public class RedisessionRepository implements SessionRepository<RedisessionRepository.RedisSession> {
+public class RedisSessionRepository implements SessionRepository<RedisSessionRepository.RedisSession> {
 
-    private static final Logger logger = LoggerFactory.getLogger(RedisessionRepository.class);
+    private static final Logger logger = LoggerFactory.getLogger(RedisSessionRepository.class);
 
     private final RMap<String, MapSession> sessions;
 
@@ -32,17 +41,31 @@ public class RedisessionRepository implements SessionRepository<RedisessionRepos
 
     private int defaultMaxInactiveInterval;
 
-    public RedisessionRepository() {
-        Config config = new Config();
-        config.setUseLinuxNativeEpoll(true);
-        config.useClusterServers()
-                // use "rediss://" for SSL connection
-                .addNodeAddress("redis://127.0.0.1:7181");
+
+    public static Config config;
+    static {
+
+        try  {
+            String configJsonFile = "/singleNodeConfig.json";
+            config = Config.fromJSON(RedisSessionRepository.class.getResourceAsStream(configJsonFile));
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public RedisSessionRepository() {
+        if (config == null) {
+            config = new Config();
+            config.useSingleServer()
+                    .setAddress("redis://localhost:6379");
+        }
+
+
 
         RedissonClient redisson = Redisson.create(config);
-        sessions = redisson.getMap("sessionMap");
+        sessions = redisson.getMap("sessionMap", new SerializationCodec());
 
-        //   this.sessions = hazelcastInstance.getMap("light:session:sessions");
     }
 
     /**
@@ -80,7 +103,15 @@ public class RedisessionRepository implements SessionRepository<RedisessionRepos
             session.originalId = session.getId();
         }
         if (session.isChanged()) {
-        //    this.sessions.put(session.getId(), session.getDelegate(), session.getMaxInactiveInterval(), TimeUnit.SECONDS);
+            ObjectMapper objectMapper = new ObjectMapper();
+          /*  try {
+                String json = objectMapper.writeValueAsString(session.getDelegate());
+                System.out.println(json);
+            }catch (Exception e) {
+
+            }*/
+
+             this.sessions.put(session.getId(), session.getDelegate());
             session.markUnchanged();
         }
     }
@@ -231,8 +262,8 @@ public class RedisessionRepository implements SessionRepository<RedisessionRepos
 
 
         private void flushImmediateIfNecessary() {
-            if (RedisessionRepository.this.redisFlushMode == RedisFlushMode.IMMEDIATE) {
-                RedisessionRepository.this.save(this);
+            if (RedisSessionRepository.this.redisFlushMode == RedisFlushMode.IMMEDIATE) {
+                RedisSessionRepository.this.save(this);
             }
         }
 
