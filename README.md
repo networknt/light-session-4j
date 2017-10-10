@@ -8,7 +8,8 @@ Light-session provide different types of repository for distributed session mana
 
 ## Project module:
 
-session-core           --- core components and interfaces for the session management. It should be included any type of repository.
+session-core           --- core components and interfaces for the session management. It should be included any type of repository. And this module also provide in memory session manager for single node.
+
 
 hazelcast-mananger     --- use hazelcast as repository for session management. Session will be persisted in the hazelcast distributed cache repository.
 
@@ -17,10 +18,43 @@ jdbc-manager           --- use RDBMS database as repository for session manageme
 redis-manager          --- use redis as repository for session management. Session will be persisted in the redis in-memory data structure store.
 
 
+## In memory session manager:
 
-## JDBC manager
+In memory session manager provided in the session-core module. System use the Caffeine as in memory cache to store the session:
+
+https://github.com/ben-manes/caffeine
+
+In server.yml file:
+
+```
+- com.networknt.session.SessionManager:
+  - com.networknt.session.MapSessionManager
+```
+
+
+## Hazelcast session manager
+
+ System use the Hazelcast as distributed cache repository to store the session:
+
+In server.yml file:
+
+```
+- com.networknt.session.SessionManager:
+  - com.networknt.session.hazelcast.HazelcastSessionManager
+```
+
+
+## JDBC session manager
 
 System provide two set of DDL script, one for Oracle, another for postgres. User need create the tables in the database before use the session management:
+
+In server.yml file:
+
+```
+- com.networknt.session.SessionManager:
+   - com.networknt.session.jdbc.JdbcSessionManager
+```
+
 
 Below is the sample for the script:
 
@@ -53,6 +87,13 @@ DROP table IF EXISTS light_session_attributes;
 
 
 ## Redis session manager
+
+In server.yml file:
+
+```
+- com.networknt.session.SessionManager:
+  - com.networknt.session.redis.RedisSessionManager
+```
 
 User need start redis server before build and test the application
 
