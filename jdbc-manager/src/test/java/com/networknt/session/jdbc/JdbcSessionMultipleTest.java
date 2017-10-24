@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
@@ -43,7 +44,7 @@ public class JdbcSessionMultipleTest {
             if (in == null) {
                 throw new RuntimeException("Failed to load resource: " + schemaResourceName);
             }
-            InputStreamReader reader = new InputStreamReader(in);
+            InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8);
             RunScript.execute(connection, reader);
 
         } catch (SQLException e) {

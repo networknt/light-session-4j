@@ -4,9 +4,11 @@ import java.util.Set;
 
 /**
  * Represents a HTTP session.
+ *
  * <p>
  * Many operations provide both a blocking and an asynchronous version.
- * <p>
+ * </p>
+ *
  * When using the async versions of operations no guarantee is made as to which threads will
  * run listeners registered with this session manger. When using the blocking version the listeners are guaranteed
  * to run in the calling thread.
@@ -39,13 +41,17 @@ public interface Session {
     long getCreationTime();
 
     /**
+     * <p>
      * Returns the last time the client sent a request associated with
      * this session, as the number of milliseconds since midnight
      * January 1, 1970 GMT, and marked by the time the container received the request.
+     * </p>
+     *
      * <p>
-     * <p>Actions that your application takes, such as getting or setting
+     * Actions that your application takes, such as getting or setting
      * a value associated with the session, do not affect the access
      * time.
+     * </p>
      *
      * @return a <code>long</code>
      *         representing the last time
@@ -117,14 +123,16 @@ public interface Session {
     Set<String> getAttributeNames();
 
     /**
+     * <p>
      * Binds an object to this session, using the name specified.
      * If an object of the same name is already bound to the session,
      * the object is replaced.
+     * </p>
+     *
      * <p>
-     * <p>
-     * <p>
-     * <p>If the value passed in is null, this has the same effect as calling
+     * If the value passed in is null, this has the same effect as calling
      * <code>removeAttribute()</code>.
+     * </p>
      *
      * @param name  the name to which the object is bound;
      *              cannot be null
@@ -140,6 +148,7 @@ public interface Session {
      * bound with the specified name, this method does nothing.
      *
      * @param name the name of the object to remove from this session
+     * @return An object removed
      * @throws IllegalStateException if this method is called on an
      *                               invalidated session
      */

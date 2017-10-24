@@ -17,6 +17,7 @@ public interface Deserializer<T> {
      * @param inputStream the input stream
      * @return the deserialized object
      * @throws IOException in case of errors reading from the stream
+     * @throws SerializationFailedException in case of serialization failed
      */
     T deserialize(InputStream inputStream) throws IOException,  SerializationFailedException;
 

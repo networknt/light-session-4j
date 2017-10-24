@@ -39,7 +39,7 @@ public class MapSessionRepository implements SessionRepository<MapSession> {
     }
     /**
      * Creates a new instance backed by the provided {@link java.util.Map}.
-     *
+     * @param sessionIdGenerator session id generator
      */
     public MapSessionRepository(SessionIdGenerator sessionIdGenerator) {
         this.sessionIdGenerator = sessionIdGenerator;
