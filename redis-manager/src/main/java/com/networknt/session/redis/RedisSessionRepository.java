@@ -176,6 +176,7 @@ public class RedisSessionRepository implements SessionRepository<RedisSessionRep
             isNew = aNew;
         }
 
+        @Override
         public void setLastAccessedTime(long lastAccessedTime) {
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
