@@ -70,7 +70,7 @@
         <version.jackson>2.9.1</version.jackson>
         <version.slf4j>1.7.25</version.slf4j>
         <version.logback>1.2.3</version.logback>
-        <version.junit>4.12</version.junit>
+        <version.junit>5.0.1</version.junit>
         <version.undertow>1.4.20.Final</version.undertow>
         <version.hazelcast>3.6.8</version.hazelcast>
         <version.snakeyaml>1.18</version.snakeyaml>
@@ -206,9 +206,10 @@
                 <version>${version.caffeine}</version>
             </dependency>
             <dependency>
-                <groupId>junit</groupId>
-                <artifactId>junit</artifactId>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-engine</artifactId>
                 <version>${version.junit}</version>
+                <scope>test</scope>
             </dependency>
             <dependency>
                 <groupId>com.h2database</groupId>
@@ -316,9 +317,10 @@
                 <version>2.19.1</version>
                 <dependencies>
                     <dependency>
-                        <groupId>org.apache.maven.surefire</groupId>
-                        <artifactId>surefire-junit47</artifactId>
-                        <version>2.19.1</version>
+                        <groupId>org.junit.platform</groupId>
+                        <artifactId>junit-platform-surefire-provider</artifactId>
+                        <version>1.0.1</version>
+                        <scope>compile</scope>
                     </dependency>
                 </dependencies>
             </plugin>
