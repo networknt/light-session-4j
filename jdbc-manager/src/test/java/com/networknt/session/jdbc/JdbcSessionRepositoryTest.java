@@ -5,9 +5,9 @@ import com.networknt.session.Session;
 import com.networknt.session.SessionRepository;
 import io.undertow.server.session.SessionConfig;
 import org.h2.tools.RunScript;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
 import java.io.InputStream;
@@ -46,7 +46,7 @@ public class JdbcSessionRepositoryTest {
     private static SessionRepository sessionRepository = (SessionRepository)SingletonServiceFactory.getBean(SessionRepository.class);
 
 
-    @BeforeClass
+    @BeforeAll
     public static void setUp() {
 
     }
@@ -61,7 +61,7 @@ public class JdbcSessionRepositoryTest {
     public void testGetSession() {
         session = sessionRepository.createSession();
 
-        Assert.assertNotNull(sessionRepository.findById(session.getId()));
+        Assertions.assertNotNull(sessionRepository.findById(session.getId()));
 
         System.out.println(sessionRepository.findById(session.getId()).getLastAccessedTime());
 
