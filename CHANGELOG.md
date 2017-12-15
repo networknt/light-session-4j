@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Added
 
 ### Changed
-- Initial Release
 - Upgrade to light-4j 1.5.5
 
+## 1.5.4 - 2017-11-27
+### Added
 
+### Changed
+- Upgrade to light-4j 1.5.4
