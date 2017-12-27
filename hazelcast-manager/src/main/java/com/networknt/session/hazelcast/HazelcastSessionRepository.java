@@ -157,6 +157,7 @@ public class HazelcastSessionRepository implements SessionRepository<HazelcastSe
             this.originalId = cached.getId();
         }
 
+        @Override
         public void setLastAccessedTime(long lastAccessedTime) {
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
