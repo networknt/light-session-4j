@@ -78,7 +78,7 @@
         <version.hikaricp>2.7.1</version.hikaricp>
         <version.h2>1.4.196</version.h2>
         <version.httpclient>4.2.6</version.httpclient>
-        <version.caffeine>2.5.6</version.caffeine>
+        <version.caffeine>2.6.2</version.caffeine>
         <versions.maven-version>2.4</versions.maven-version>
         <argLine>-Xmx512m -XX:MaxPermSize=256m</argLine>
     </properties>
