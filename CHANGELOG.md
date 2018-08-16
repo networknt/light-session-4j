@@ -1,5 +1,16 @@
 # Change Log
 
+## [1.5.18](https://github.com/networknt/light-session-4j/tree/1.5.18) (2018-08-16)
+[Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.17...1.5.18)
+
+**Closed issues:**
+
+- move the integration test service.yml to config folder [\#13](https://github.com/networknt/light-session-4j/issues/13)
+- upgrade to undertow 2.0.11.Final [\#12](https://github.com/networknt/light-session-4j/issues/12)
+
+## [1.5.17](https://github.com/networknt/light-session-4j/tree/1.5.17) (2018-07-15)
+[Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.16...1.5.17)
+
 ## [1.5.16](https://github.com/networknt/light-session-4j/tree/1.5.16) (2018-07-05)
 [Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.15...1.5.16)
 
