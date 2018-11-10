@@ -1,5 +1,15 @@
 # Change Log
 
+## [1.5.22](https://github.com/networknt/light-session-4j/tree/1.5.22) (2018-11-10)
+[Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.21...1.5.22)
+
+**Closed issues:**
+
+- upgrade apache httpclient to 4.3.6 in test dependency [\#14](https://github.com/networknt/light-session-4j/issues/14)
+
+## [1.5.21](https://github.com/networknt/light-session-4j/tree/1.5.21) (2018-10-26)
+[Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.20...1.5.21)
+
 ## [1.5.20](https://github.com/networknt/light-session-4j/tree/1.5.20) (2018-10-05)
 [Full Changelog](https://github.com/networknt/light-session-4j/compare/1.5.19...1.5.20)
 
