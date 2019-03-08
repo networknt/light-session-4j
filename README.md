@@ -1,5 +1,13 @@
 # light-session
 
+[Stack Overflow](https://stackoverflow.com/questions/tagged/light-4j) |
+[Google Group](https://groups.google.com/forum/#!forum/light-4j) |
+[Gitter Chat](https://gitter.im/networknt/light-4j) |
+[Subreddit](https://www.reddit.com/r/lightapi/) |
+[Youtube Channel](https://www.youtube.com/channel/UCHCRMWJVXw8iB7zKxF55Byw) |
+[Documentation](https://doc.networknt.com/style/light-session-4j/) |
+[Contribution Guide](https://doc.networknt.com/contribute/) |
+
 light-4j framework build upon undertow server. Undertow manager session in single node module and doesn't support distributed session management.
 
 Light-session aims to provide a common infrastructure for managing sessions in distributed environment.
