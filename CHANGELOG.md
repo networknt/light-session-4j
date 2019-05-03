@@ -1,5 +1,12 @@
 # Change Log
 
+## [1.6.1](https://github.com/networknt/light-session-4j/tree/1.6.1) (2019-05-03)
+
+
+**Merged pull requests:**
+
+
+- fixes \#16 update pom.xml to remove slf4j-ext [\#17](https://github.com/networknt/light-session-4j/pull/17) ([stevehu](https://github.com/stevehu))
 ## [1.6.0](https://github.com/networknt/light-session-4j/tree/1.6.0) (2019-04-05)
 
 
