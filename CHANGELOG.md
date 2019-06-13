@@ -1,5 +1,13 @@
 # Change Log
 
+## [2.0.1](https://github.com/networknt/light-session-4j/tree/2.0.1) (2019-06-13)
+
+
+**Merged pull requests:**
+
+
+- fixes \#18 add both release and snapshot repositories [\#19](https://github.com/networknt/light-session-4j/pull/19) ([stevehu](https://github.com/stevehu))
+- fixes \#16 update pom.xml to remove slf4j-ext [\#17](https://github.com/networknt/light-session-4j/pull/17) ([stevehu](https://github.com/stevehu))
 ## [1.6.4](https://github.com/networknt/light-session-4j/tree/1.6.4) (2019-06-10)
 
 
