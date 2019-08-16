@@ -1,5 +1,12 @@
 # Change Log
 
+## [2.0.4](https://github.com/networknt/light-session-4j/tree/2.0.4) (2019-08-16)
+
+
+**Merged pull requests:**
+
+
+- fixes \#22 upgrade jackson-databind to 2.9.9.3 [\#23](https://github.com/networknt/light-session-4j/pull/23) ([stevehu](https://github.com/stevehu))
 ## [2.0.3](https://github.com/networknt/light-session-4j/tree/2.0.3) (2019-07-31)
 
 
