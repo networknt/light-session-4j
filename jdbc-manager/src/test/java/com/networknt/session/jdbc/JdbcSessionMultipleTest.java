@@ -61,7 +61,7 @@ public class JdbcSessionMultipleTest {
             logger.info("starting server1");
             HttpHandler handler = getTestHandler();
             server1 = Undertow.builder()
-                    .addHttpListener(8081, "localhost")
+                    .addHttpListener(18081, "localhost")
                     .setHandler(handler)
                     .build();
             server1.start();
@@ -70,7 +70,7 @@ public class JdbcSessionMultipleTest {
             logger.info("starting server2");
             HttpHandler handler = getTestHandler();
             server2 = Undertow.builder()
-                    .addHttpListener(8082, "localhost")
+                    .addHttpListener(18082, "localhost")
                     .setHandler(handler)
                     .build();
             server2.start();
@@ -122,21 +122,21 @@ public class JdbcSessionMultipleTest {
         TestHttpClient client = new TestHttpClient();
         client.setCookieStore(new BasicCookieStore());
         try {
-            HttpGet get = new HttpGet("http://localhost:8081/get");
+            HttpGet get = new HttpGet("http://localhost:18081/get");
             HttpResponse result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             Header[] header = result.getHeaders(COUNT);
             Assertions.assertEquals("0", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8082/get");
+            get = new HttpGet("http://localhost:18082/get");
             result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             header = result.getHeaders(COUNT);
             Assertions.assertEquals("1", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8081/get");
+            get = new HttpGet("http://localhost:18081/get");
             result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);

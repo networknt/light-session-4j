@@ -37,7 +37,7 @@ public class RedisSessionSingleIT {
             logger.info("starting server");
             HttpHandler handler = getTestHandler();
             server = Undertow.builder()
-                    .addHttpListener(8080, "localhost")
+                    .addHttpListener(18080, "localhost")
                     .setHandler(handler)
                     .build();
             server.start();
@@ -79,21 +79,21 @@ public class RedisSessionSingleIT {
         TestHttpClient client = new TestHttpClient();
         client.setCookieStore(new BasicCookieStore());
         try {
-            HttpGet get = new HttpGet("http://localhost:8080/get");
+            HttpGet get = new HttpGet("http://localhost:18080/get");
             HttpResponse result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             Header[] header = result.getHeaders(COUNT);
             Assertions.assertEquals("0", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8080/get");
+            get = new HttpGet("http://localhost:18080/get");
             result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
             header = result.getHeaders(COUNT);
             Assertions.assertEquals("1", header[0].getValue());
 
-            get = new HttpGet("http://localhost:8080/get");
+            get = new HttpGet("http://localhost:18080/get");
             result = client.execute(get);
             Assertions.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
             HttpClientUtils.readResponse(result);
