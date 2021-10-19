@@ -1,5 +1,14 @@
 # Change Log
 
+## [2.0.32](https://github.com/networknt/light-session-4j/tree/2.0.32) (2021-10-19)
+
+
+**Merged pull requests:**
+
+
+- fixes \#28 change the test ports to avoid conflicts with other services [\#29](https://github.com/networknt/light-session-4j/pull/29) ([stevehu](https://github.com/stevehu))
+
+
 ## [2.0.31](https://github.com/networknt/light-session-4j/tree/2.0.31) (2021-09-22)
 
 
