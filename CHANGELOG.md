@@ -1,5 +1,18 @@
 # Change Log
 
+## [2.1.0](https://github.com/networknt/light-session-4j/tree/2.1.0) (2022-02-27)
+
+
+**Merged pull requests:**
+
+
+- fixes \#35 update the jdbc test h2 database to mem instead of test file [\#36](https://github.com/networknt/light-session-4j/pull/36) ([stevehu](https://github.com/stevehu))
+- fixes \#33 upgrade hazelcast to 4.2.4 and update the package [\#34](https://github.com/networknt/light-session-4j/pull/34) ([stevehu](https://github.com/stevehu))
+- Bump hazelcast from 3.6.8 to 4.0.5 [\#32](https://github.com/networknt/light-session-4j/pull/32) ([dependabot](https://github.com/apps/dependabot))
+- Bump h2 from 2.0.206 to 2.1.210 [\#31](https://github.com/networknt/light-session-4j/pull/31) ([dependabot](https://github.com/apps/dependabot))
+- Bump h2 from 1.4.196 to 2.0.206 [\#30](https://github.com/networknt/light-session-4j/pull/30) ([dependabot](https://github.com/apps/dependabot))
+
+
 ## [2.0.32](https://github.com/networknt/light-session-4j/tree/2.0.32) (2021-10-19)
 
 
