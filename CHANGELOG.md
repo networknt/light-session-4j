@@ -1,5 +1,12 @@
 # Change Log
 
+## [2.1.1](https://github.com/networknt/light-session-4j/tree/2.1.1) (2022-04-26)
+
+
+**Merged pull requests:**
+
+
+- Bump hazelcast from 4.2.4 to 5.1 [\#37](https://github.com/networknt/light-session-4j/pull/37) ([dependabot](https://github.com/apps/dependabot))
 ## [2.1.0](https://github.com/networknt/light-session-4j/tree/2.1.0) (2022-02-27)
 
 
