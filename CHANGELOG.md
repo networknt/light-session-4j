@@ -1,5 +1,11 @@
 # Change Log
 
+## [2.1.2](https://github.com/networknt/light-session-4j/tree/2.1.2) (2022-10-22)
+
+
+**Merged pull requests:**
+
+
 ## [2.1.1](https://github.com/networknt/light-session-4j/tree/2.1.1) (2022-04-26)
 
 
