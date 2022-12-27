@@ -97,7 +97,7 @@
         <version.slf4j>1.7.36</version.slf4j>
         <version.logback>1.2.11</version.logback>
         <version.junit>5.0.1</version.junit>
-        <version.hazelcast>5.1</version.hazelcast>
+        <version.hazelcast>5.1.3</version.hazelcast>
         <version.undertow>2.3.0.Final</version.undertow>
         <version.snakeyaml>1.33</version.snakeyaml>
         <version.redisson>3.5.4</version.redisson>
