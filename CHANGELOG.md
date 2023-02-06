@@ -1,5 +1,13 @@
 # Change Log
 
+## [2.1.6](https://github.com/networknt/light-session-4j/tree/2.1.6) (2023-02-06)
+
+
+**Merged pull requests:**
+
+
+- fixes \#46 upgrade to redisson to 3.19.0 [\#47](https://github.com/networknt/light-session-4j/pull/47) ([stevehu](https://github.com/stevehu))
+- fixes \#44 upgrade hazelcast to version 5.2.1 to resolve security vune… [\#45](https://github.com/networknt/light-session-4j/pull/45) ([stevehu](https://github.com/stevehu))
 ## [2.1.5](https://github.com/networknt/light-session-4j/tree/2.1.5) (2023-01-04)
 
 
