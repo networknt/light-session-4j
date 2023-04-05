@@ -104,7 +104,7 @@
         <version.hikaricp>3.1.0</version.hikaricp>
         <version.h2>2.1.210</version.h2>
         <version.httpclient>4.5.13</version.httpclient>
-        <version.caffeine>2.6.2</version.caffeine>
+        <version.caffeine>3.1.5</version.caffeine>
         <versions.maven-version>2.4</versions.maven-version>
         <version.javadoc-packagelist-plugin>1.0.0</version.javadoc-packagelist-plugin>
         <version.maven-javadoc>3.4.1</version.maven-javadoc>
