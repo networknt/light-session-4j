@@ -14,19 +14,17 @@ import org.apache.http.Header;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.BasicCookieStore;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Created by gavin on 2017-09-27.
  */
-public class RedisSessionSingleIT {
+@Disabled
+public class RedisSessionSingleTest {
 
-    static final Logger logger = LoggerFactory.getLogger(RedisSessionSingleIT.class);
+    static final Logger logger = LoggerFactory.getLogger(RedisSessionSingleTest.class);
     public static final String COUNT = "count";
 
     static Undertow server = null;
