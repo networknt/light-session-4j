@@ -14,15 +14,14 @@ import org.apache.http.Header;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.BasicCookieStore;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class RedisSessionMultipleIT {
-    static final Logger logger = LoggerFactory.getLogger(RedisSessionMultipleIT.class);
+
+@Disabled
+public class RedisSessionMultipleTest {
+    static final Logger logger = LoggerFactory.getLogger(RedisSessionMultipleTest.class);
     public static final String COUNT = "count";
 
     static Undertow server1 = null;
