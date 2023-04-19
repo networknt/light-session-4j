@@ -1,5 +1,12 @@
 # Change Log
 
+## [2.1.13](https://github.com/networknt/light-session-4j/tree/2.1.13) (2023-04-19)
+
+
+**Merged pull requests:**
+
+
+- fixes \#49 disable redis-manager test cases to remove the external dep… [\#50](https://github.com/networknt/light-session-4j/pull/50) ([stevehu](https://github.com/stevehu))
 ## [2.1.12](https://github.com/networknt/light-session-4j/tree/2.1.12) (2023-04-14)
 
 
