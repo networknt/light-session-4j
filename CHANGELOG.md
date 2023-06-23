@@ -7,6 +7,8 @@
 
 
 - fixes \#52 upgrade hazelcast to 5.3.1 to resolve security vulnerabilities [\#53](https://github.com/networknt/light-session-4j/pull/53) ([stevehu](https://github.com/stevehu))
+
+
 ## [2.1.21](https://github.com/networknt/light-session-4j/tree/2.1.21) (2023-06-22)
 
 
