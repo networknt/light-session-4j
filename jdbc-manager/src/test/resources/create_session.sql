@@ -19,4 +19,3 @@ DROP table IF EXISTS light_session_attributes;
    attribute_bytes BYTEA,
    PRIMARY KEY(session_id, attribute_name)
   );
-

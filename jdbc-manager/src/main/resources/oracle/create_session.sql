@@ -22,4 +22,3 @@ DROP table IF EXISTS light_session_attributes;
   );
 
    ALTER TABLE light_session_attributes ADD ( CONSTRAINT PK_LIGHT_SESSION_ATTRIBUTES  PRIMARY KEY (session_id, attribute_name) ) ;
-
