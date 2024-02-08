@@ -118,4 +118,3 @@ docker exec -it some-redis bash
 /data# redis-cli ping
 
 Result should be: PONG
-
