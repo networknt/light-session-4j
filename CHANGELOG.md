@@ -1,5 +1,13 @@
 # Change Log
 
+## [2.1.32](https://github.com/networknt/light-session-4j/tree/2.1.32) (2024-02-27)
+
+
+**Merged pull requests:**
+
+
+- [pre-commit.ci] pre-commit autoupdate [\#58](https://github.com/networknt/light-session-4j/pull/58) ([pre-commit-ci](https://github.com/apps/pre-commit-ci))
+- fixes \#56 add pre-commit hook and apply it [\#57](https://github.com/networknt/light-session-4j/pull/57) ([stevehu](https://github.com/stevehu))
 ## [2.1.31](https://github.com/networknt/light-session-4j/tree/2.1.31) (2024-01-16)
 
 
