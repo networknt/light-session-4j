@@ -9,9 +9,10 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.networknt</groupId>
     <artifactId>session-core</artifactId>
-
+    <packaging>jar</packaging>
+    <name>session-core</name>
+    <description>Core session management for NetworkNT Light Session</description>
 
     <dependencies>
         <dependency>

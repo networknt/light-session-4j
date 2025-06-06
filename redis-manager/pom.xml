@@ -9,8 +9,10 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.networknt</groupId>
     <artifactId>redis-manager</artifactId>
+    <packaging>jar</packaging>
+    <name>redis-manager</name>
+    <description>Redis session manager for NetworkNT Light Session</description>
 
     <dependencies>
         <dependency>

@@ -9,8 +9,11 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.networknt</groupId>
     <artifactId>jdbc-manager</artifactId>
+    <packaging>jar</packaging>
+    <name>jdbc-manager</name>
+    <description>JDBC session manager for NetworkNT Light Session</description>
+
     <dependencies>
         <dependency>
             <groupId>io.undertow</groupId>
