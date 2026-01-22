@@ -101,7 +101,7 @@
         <version.logback>1.5.18</version.logback>
         <version.junit>5.11.3</version.junit>
         <version.hazelcast>5.3.4</version.hazelcast>
-        <version.undertow>2.3.20.Final</version.undertow>
+        <version.undertow>2.3.22.Final</version.undertow>
         <version.snakeyaml>2.4</version.snakeyaml>
         <version.redisson>3.45.1</version.redisson>
         <version.hikaricp>6.2.1</version.hikaricp>
