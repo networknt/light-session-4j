@@ -92,6 +92,14 @@ DROP table IF EXISTS light_session_attributes;
   );
 ```
 
+JDBC session attributes are deserialized with a Java `ObjectInputFilter`.
+Common JDK value types and collection implementations are allowed by default.
+If an application stores custom serializable session attribute classes, allow
+them explicitly with the `light.session.jdbc.deserialization.allowedClasses`
+system property, or allow a package prefix with
+`light.session.jdbc.deserialization.allowedPackages`. Both properties accept
+comma-separated values.
+
 
 
 ## Redis session manager
