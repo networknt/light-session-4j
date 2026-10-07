@@ -1,5 +1,27 @@
 # Change Log
 
+## [2.4.0](https://github.com/networknt/light-session-4j/tree/2.4.0) (2026-10-07)
+
+**Commits:**
+
+- upgrade to version 2.4.0 before release in master branch ([051c922](https://github.com/networknt/light-session-4j/commit/051c9225eb474c6ca9d759825cbcdada5ea6acbd)) (by Steve Hu)
+- upgrade maven-javadoc to 3.12.0 from 3.4.1 ([4dc5ae3](https://github.com/networknt/light-session-4j/commit/4dc5ae318448ec32a20e1996e1d625f3c79d58d9)) (by Steve Hu)
+- upgrade h2 to 2.5.252 from 2.5.250 ([7f63088](https://github.com/networknt/light-session-4j/commit/7f63088063892c54dbcdd2013d5efa3686c1b44d)) (by Steve Hu)
+- upgrade maven-version to 2.22.0 from 2.4 ([0f4bb0c](https://github.com/networknt/light-session-4j/commit/0f4bb0cf8706920a61f7582d09ffa194214c5c9e)) (by Steve Hu)
+- upgrade slf4j to 2.0.20 from 2.0.19 ([1f6355d](https://github.com/networknt/light-session-4j/commit/1f6355d5975b64b6773de3c1bc93b3b0a3ec8ca6)) (by Steve Hu)
+- upgrade jackson to 2.22.3 from 2.22.1 ([9532dcc](https://github.com/networknt/light-session-4j/commit/9532dcc1de572158c1c2c5f9d08e8668e93b654b)) (by Steve Hu)
+- upgrade to version 2.3.8-SNAPSHOT after release in master branch ([9f46cc8](https://github.com/networknt/light-session-4j/commit/9f46cc80c6e650812cb8fe072a3c229d3c4ed26d)) (by Steve Hu)
+- upgrade slf4j to 2.0.19 from 2.0.17 ([91dc7df](https://github.com/networknt/light-session-4j/commit/91dc7df23f04705d28bd8f13a26fd5b01e1ab3ee)) (by Steve Hu)
+- upgrade maven-surefire to 3.6.0 ([d167d7d](https://github.com/networknt/light-session-4j/commit/d167d7da850f115e216244efc32d656821e77856)) (by Steve Hu)
+- upgrade hikaricp to 7.1.0 from 6.2.1 ([00b14ca](https://github.com/networknt/light-session-4j/commit/00b14ca306b9dab98845c4afd8379ac6b3557229)) (by Steve Hu)
+- upgrade caffeine to 3.2.4 from 3.3.0 ([19228ee](https://github.com/networknt/light-session-4j/commit/19228ee70ac58afe4b139a0c1cad5eec4b844a62)) (by Steve Hu)
+- upgrade logback to 1.6.3 from 1.5.37 ([57f1482](https://github.com/networknt/light-session-4j/commit/57f1482ce4b183c41fc7301e514dcea8fb76e6a2)) (by Steve Hu)
+- upgrade version.caffeine to 3.2.4 from 3.2.0 ([d21fd75](https://github.com/networknt/light-session-4j/commit/d21fd751512dc04fa4fa5065065b43f72ca32734)) (by Steve Hu)
+- Remove obsolete javadoc-packagelist-maven-plugin workaround ([f78e63e](https://github.com/networknt/light-session-4j/commit/f78e63ebe417b7a7fd89e25dffb8e01fe0ca0c9d)) (by Steve Hu)
+- upgrade central-publishing-maven to 0.11.0 from 0.7.0 ([d75b90e](https://github.com/networknt/light-session-4j/commit/d75b90e9553e9f6acca512fa0cf607acb7e5228e)) (by Steve Hu)
+- upgrade h2 to 2.5.250 from 2.3.232 ([21299aa](https://github.com/networknt/light-session-4j/commit/21299aac9793e22eed616691e06e4b3e4723f568)) (by Steve Hu)
+- upgrade to version 2.3.8-SNAPSHOT after release in master branch ([1006efd](https://github.com/networknt/light-session-4j/commit/1006efd26b7f94d3bb701a30815a78bf3ece7417)) (by Steve Hu)
+
 ## [2.3.7](https://github.com/networknt/light-session-4j/tree/2.3.7) (2026-08-12)
 
 
