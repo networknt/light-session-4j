@@ -104,7 +104,7 @@
         <version.hazelcast>5.3.5</version.hazelcast>
         <version.undertow>2.4.4.Final</version.undertow>
         <version.snakeyaml>2.7</version.snakeyaml>
-        <version.redisson>3.45.1</version.redisson>
+        <version.redisson>4.8.0</version.redisson>
         <version.hikaricp>7.1.0</version.hikaricp>
         <version.h2>2.5.252</version.h2>
         <version.httpclient>4.5.14</version.httpclient>
