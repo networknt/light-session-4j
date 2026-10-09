@@ -47,7 +47,7 @@ public class RedisSessionRepository implements SessionRepository<RedisSessionRep
 
         try  {
             String configJsonFile = "/singleNodeConfig.json";
-            config = Config.fromJSON(RedisSessionRepository.class.getResourceAsStream(configJsonFile));
+            config = RedissonJsonConfig.read(RedisSessionRepository.class.getResourceAsStream(configJsonFile));
 
         } catch (IOException e) {
             e.printStackTrace();
