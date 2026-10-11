@@ -1,5 +1,20 @@
 # Change Log
 
+## [2.4.1](https://github.com/networknt/light-session-4j/tree/2.4.1) (2026-10-11)
+
+**Commits:**
+
+- upgrade to version 2.4.1 before release in master branch ([3b6a561](https://github.com/networknt/light-session-4j/commit/3b6a561fbee169fab75c5f9427551292b1035e80)) (by Steve Hu)
+- upgrade maven-gpg to 3.2.8 from 3.2.7 ([25b9543](https://github.com/networknt/light-session-4j/commit/25b9543ed08ce7fd8c2e318dbeb7b16bd56bdee2)) (by Steve Hu)
+- Bump com.hazelcast:hazelcast from 5.3.5 to 5.7.0 (#65) ([e4b9306](https://github.com/networknt/light-session-4j/commit/e4b9306b8ce83cea3bc3d0aed790d2c68b944b86)) (by dependabot\[bot\])
+- fix: preserve JSON configuration loading with Redisson 4 ([74145b0](https://github.com/networknt/light-session-4j/commit/74145b04f41fb9b0760cb6a3cccde2bc1b490f73)) (by Steve Hu)
+- build: upgrade JUnit to 6.1.3 ([2949b9b](https://github.com/networknt/light-session-4j/commit/2949b9b25b6f70f30e8f7e8b35e9c429d5d5dc80)) (by Steve Hu)
+- upgrade redisson to 4.8.0 from 3.45.1 ([8873d1b](https://github.com/networknt/light-session-4j/commit/8873d1b7e46a47c34370689273cc40d0674f5b02)) (by Steve Hu)
+- upgrade udertow to 2.4.4.Final from 2.4.1.Final ([0e34404](https://github.com/networknt/light-session-4j/commit/0e34404d16cc65c6b8e9eaabe07eb1bea63bae74)) (by Steve Hu)
+- upgrade logback to 1.6.5 from 1.6.3 ([f295084](https://github.com/networknt/light-session-4j/commit/f2950844add9d0b16e97fd875fa9f96791406504)) (by Steve Hu)
+- upgrade snakeyaml to 2.7 from 2.4 ([e87b29e](https://github.com/networknt/light-session-4j/commit/e87b29e48a1302dc536e55821445c5130aff0c8c)) (by Steve Hu)
+- upgrade to version 2.4.1-SNAPSHOT after release in master branch ([8d0ee9e](https://github.com/networknt/light-session-4j/commit/8d0ee9ea0ffcd6bfc1b75bcb5094873552750a38)) (by Steve Hu)
+
 ## [2.4.0](https://github.com/networknt/light-session-4j/tree/2.4.0) (2026-10-07)
 
 **Commits:**
