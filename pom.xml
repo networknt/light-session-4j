@@ -108,7 +108,7 @@
         <version.hikaricp>7.1.0</version.hikaricp>
         <version.h2>2.5.252</version.h2>
         <version.httpclient>4.5.14</version.httpclient>
-        <version.caffeine>3.3.0</version.caffeine>
+        <version.caffeine>3.3.1</version.caffeine>
         <versions.maven-version>2.22.0</versions.maven-version>
         <version.maven-javadoc>3.12.0</version.maven-javadoc>
         <version.nexus-staging-maven>1.7.0</version.nexus-staging-maven>
