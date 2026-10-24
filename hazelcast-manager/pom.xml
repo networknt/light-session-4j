@@ -28,6 +28,7 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
         <dependency>
+            <!-- Preserve the classic API export independently of light-4j config. -->
             <groupId>org.yaml</groupId>
             <artifactId>snakeyaml</artifactId>
         </dependency>

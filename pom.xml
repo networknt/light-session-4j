@@ -200,6 +200,7 @@
                 <version>${version.undertow}</version>
             </dependency>
             <dependency>
+                <!-- Keep Redisson and other classic consumers on the existing compatibility version. -->
                 <groupId>org.yaml</groupId>
                 <artifactId>snakeyaml</artifactId>
                 <version>${version.snakeyaml}</version>
