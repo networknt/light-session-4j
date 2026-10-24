@@ -28,6 +28,11 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
         <dependency>
+            <!-- Preserve the classic API export for existing downstream consumers. -->
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
         </dependency>
