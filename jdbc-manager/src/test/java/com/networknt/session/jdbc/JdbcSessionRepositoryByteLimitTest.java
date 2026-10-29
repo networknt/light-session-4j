@@ -1,25 +1,20 @@
 package com.networknt.session.jdbc;
 
-import com.networknt.session.jdbc.serializer.DefaultDeserializer;
-import com.networknt.session.jdbc.serializer.SerializationFailedException;
+import com.networknt.session.jdbc.serializer.SerializedAttributeLimits;
 import org.junit.jupiter.api.Test;
 import java.io.*;
 import java.lang.reflect.Proxy;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.*;
 
 class JdbcSessionRepositoryByteLimitTest {
-    private static final int LIMIT = DefaultDeserializer.MAX_SERIALIZED_BYTES;
+    private static final int LIMIT = SerializedAttributeLimits.DEFAULT_MAX_BYTES;
 
     private JdbcSessionRepository repository() {
-        return new JdbcSessionRepository(null) {
-            // extractData currently calls setAttribute/save even for loaded data.
-            // Avoid writes: this fixture exercises only the actual result extraction path.
-            @Override public void save(JdbcSession session) { }
-        };
+        // Any accidental write during hydration fails because no DataSource is supplied.
+        return new JdbcSessionRepository(null);
     }
 
     @Test
@@ -53,8 +48,7 @@ class JdbcSessionRepositoryByteLimitTest {
             @Override public void close() { closed = true; }
         }
         LargeColumn column = new LargeColumn();
-        SQLException error = assertThrows(SQLException.class, () -> repository().extractData(row(column)));
-        assertInstanceOf(SerializationFailedException.class, error.getCause());
+        assertTrue(repository().extractData(row(column)).isEmpty());
         assertEquals(LIMIT + 1, column.consumed);
         assertTrue(column.closed);
     }
@@ -63,26 +57,36 @@ class JdbcSessionRepositoryByteLimitTest {
     void closesTruncatedOrCorruptColumnsOnFailure() throws Exception {
         for (byte[] bytes : new byte[][]{new byte[0], new byte[]{1, 2, 3}, Arrays.copyOf(serialize("safe"), 6)}) {
             TrackingInput input = new TrackingInput(bytes);
-            assertThrows(SQLException.class, () -> repository().extractData(row(input)));
+            assertTrue(repository().extractData(row(input)).isEmpty());
             assertTrue(input.closed);
         }
     }
 
     @Test
-    void closesColumnWhenTheDriverStreamThrows() {
+    void closesColumnWhenTheDriverStreamThrows() throws Exception {
         class BrokenInput extends InputStream {
             boolean closed;
             @Override public int read() throws IOException { throw new IOException("synthetic read failure"); }
             @Override public void close() { closed = true; }
         }
         BrokenInput input = new BrokenInput();
-        assertThrows(SQLException.class, () -> repository().extractData(row(input)));
+        assertTrue(repository().extractData(row(input)).isEmpty());
         assertTrue(input.closed);
     }
 
     @Test
-    void nullColumnFailsWithSqlExceptionInsteadOfUncheckedNullPointer() {
-        assertThrows(SQLException.class, () -> repository().extractData(row(null)));
+    void nullColumnRejectsTheSessionWithoutUncheckedNullPointer() throws Exception {
+        assertTrue(repository().extractData(row(null)).isEmpty());
+    }
+
+    @Test
+    void closeFailureAfterSuccessfulReadDoesNotDiscardValidData() throws Exception {
+        class CloseFailure extends ByteArrayInputStream {
+            CloseFailure(byte[] bytes) { super(bytes); }
+            @Override public void close() throws IOException { throw new IOException("synthetic close failure"); }
+        }
+        assertEquals("safe", repository().extractData(row(new CloseFailure(serialize("safe"))))
+                .getFirst().getAttribute("payload"));
     }
 
     private ResultSet row(InputStream input) {

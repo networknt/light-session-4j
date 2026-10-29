@@ -7,13 +7,14 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DeserializationByteLimitTest {
-    private static final int LIMIT = DefaultDeserializer.MAX_SERIALIZED_BYTES;
+    private static final int LIMIT = SerializedAttributeLimits.DEFAULT_MAX_BYTES;
 
     @AfterEach
     void resetPolicy() {
         System.clearProperty(DefaultDeserializer.ALLOWED_CLASSES_PROPERTY);
         System.clearProperty(DefaultDeserializer.ALLOWED_PACKAGES_PROPERTY);
         Hook.executions = 0;
+        System.clearProperty(SerializedAttributeLimits.MAX_BYTES_PROPERTY);
     }
 
     @Test
@@ -125,6 +126,38 @@ class DeserializationByteLimitTest {
         assertThrows(SerializationFailedException.class, () -> converter.deserialize(null));
         assertThrows(SerializationFailedException.class, () -> converter.deserializeStream(null));
         assertThrows(SerializationFailedException.class, () -> converter.deserialize(new byte[]{1, 2, 3}));
+    }
+
+    @Test
+    void configuredLimitAppliesToNewReadersAndWritersTogether() throws Exception {
+        System.setProperty(SerializedAttributeLimits.MAX_BYTES_PROPERTY, "3145728");
+        String value = "x".repeat(2 * LIMIT);
+        ValueBytesConverter converter = new ValueBytesConverter();
+        byte[] bytes = converter.serializer(value);
+        assertEquals(value, converter.deserialize(bytes));
+        assertEquals(value, new DefaultDeserializer().deserialize(new ByteArrayInputStream(bytes)));
+        // A previously created converter keeps its policy, avoiding read/write drift.
+        System.clearProperty(SerializedAttributeLimits.MAX_BYTES_PROPERTY);
+        assertEquals(value, converter.deserialize(bytes));
+        assertThrows(SerializationFailedException.class, () -> new ValueBytesConverter().deserialize(bytes));
+    }
+
+    @Test
+    void invalidLimitsFailAtConstructionInsteadOfDisablingTheBound() {
+        for (String value : new String[]{"", "0", "-1", "invalid", "2147483647", "2147483648"}) {
+            System.setProperty(SerializedAttributeLimits.MAX_BYTES_PROPERTY, value);
+            assertThrows(IllegalArgumentException.class, DefaultDeserializer::new);
+            assertThrows(IllegalArgumentException.class, ValueBytesConverter::new);
+        }
+    }
+
+    @Test
+    void nullAndOversizedInputsHaveDistinctMessages() throws Exception {
+        ValueBytesConverter converter = new ValueBytesConverter();
+        assertTrue(assertThrows(SerializationFailedException.class, () -> converter.deserialize(null))
+                .getMessage().contains("must not be null"));
+        assertTrue(assertThrows(SerializationFailedException.class, () -> converter.deserialize(new byte[LIMIT + 1]))
+                .getMessage().contains("at most"));
     }
 
     private static byte[] serialize(Object value) throws Exception {
