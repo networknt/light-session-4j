@@ -11,6 +11,8 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.sql.*;
 import java.util.*;
 
@@ -179,87 +181,89 @@ public class JdbcSessionRepository implements
 
     @Override
     public void save(JdbcSession session) {
-        if (session.isNew()) {
-            try (final Connection connection = dataSource.getConnection()) {
-                connection.setAutoCommit(false);
+        // Validate every pending value before acquiring a connection or changing rows.
+        Map<String, byte[]> attributes = new LinkedHashMap<>();
+        try {
+            if (session.isNew()) {
+                for (String name : session.getAttributeNames()) {
+                    attributes.put(name, converter.serializer(session.getAttribute(name)));
+                }
+            } else {
+                for (Map.Entry<String, Object> entry : session.getDelta().entrySet()) {
+                    attributes.put(entry.getKey(), entry.getValue() == null ? null : converter.serializer(entry.getValue()));
+                }
+            }
+        } catch (SerializationFailedException e) {
+            throw new IllegalStateException("Failed to serialize JDBC session attributes; pending changes retained", e);
+        }
 
-                PreparedStatement stmt = connection.prepareStatement(this.createSessionQuery);
-                stmt.setString(1, session.getId());
+        boolean committed = false;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                writeSession(connection, session, attributes);
+                connection.commit();
+                committed = true;
+                session.clearChangeFlags();
+            } catch (SQLException | RuntimeException e) {
+                try { connection.rollback(); } catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
+                throw e;
+            }
+        } catch (SQLException e) {
+            if (committed) {
+                logger.warn("Committed JDBC session; connection cleanup failed: {}", e.getClass().getSimpleName());
+            } else {
+                throw new IllegalStateException("Failed to persist JDBC session; pending changes retained", e);
+            }
+        }
+    }
+
+    private void writeSession(Connection connection, JdbcSession session, Map<String, byte[]> attributes) throws SQLException {
+        boolean isNew = session.isNew();
+        try (PreparedStatement stmt = connection.prepareStatement(isNew ? createSessionQuery : updateSessionQuery)) {
+            stmt.setString(1, session.getId());
+            if (isNew) {
                 stmt.setLong(2, session.getCreationTime());
                 stmt.setLong(3, session.getLastAccessedTime());
                 stmt.setInt(4, session.getMaxInactiveInterval());
                 stmt.setLong(5, session.getExpiryTime());
                 stmt.setString(6, session.getPrincipalName());
-                int count = stmt.executeUpdate();
-                if (!session.getAttributeNames().isEmpty()) {
-                    final List<String> attributeNames = new ArrayList<>(session.getAttributeNames());
-                    try (PreparedStatement psAtt = connection.prepareStatement(this.createSessionAttributeQuery)) {
-                        for (String attributeName : attributeNames) {
-                            psAtt.setString(1, session.getId());
-                            psAtt.setString(2, attributeName);
-                            serialize(psAtt, 3, session.getAttribute(attributeName));
-                            psAtt.addBatch();
-                        }
-                        psAtt.executeBatch();
-                    }
-                }
-                connection.commit();
-
-                if (count != 1) {
-                    logger.error("Failed to insert session: {}", session.getId());
-                }
-            } catch (SQLException e) {
-                logger.error("SqlException:", e);
-            }
-        } else {
-            try (final Connection connection = dataSource.getConnection()) {
-
-                connection.setAutoCommit(false);
-                PreparedStatement stmt = connection.prepareStatement(this.updateSessionQuery);
-                stmt.setString(1, session.getId());
+            } else {
                 stmt.setLong(2, session.getLastAccessedTime());
                 stmt.setInt(3, session.getMaxInactiveInterval());
                 stmt.setLong(4, session.getExpiryTime());
                 stmt.setString(5, session.getPrincipalName());
                 stmt.setString(6, session.getId());
-                int count = stmt.executeUpdate();
-
-                Map<String, Object> delta = session.getDelta();
-                if (!delta.isEmpty()) {
-                    for (final Map.Entry<String, Object> entry : delta.entrySet()) {
-                        if (entry.getValue() == null) {
-                            try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionAttributeQuery)) {
-                                psAtt.setString(1, session.getId());
-                                psAtt.setString(2, entry.getKey());
-                                psAtt.executeUpdate();
-                            }
-                        } else {
-                            int updatedCount = 0;
-                            try (PreparedStatement psAtt = connection.prepareStatement(this.updateSessionAttributeQuery)) {
-                                serialize(psAtt, 1, entry.getValue());
-                                psAtt.setString(2, session.getId());
-                                psAtt.setString(3, entry.getKey());
-                                updatedCount = psAtt.executeUpdate();
-                            }
-                            if (updatedCount == 0) {
-                                try (PreparedStatement psAtt = connection.prepareStatement(this.createSessionAttributeQuery)) {
-                                    psAtt.setString(1, session.getId());
-                                    psAtt.setString(2, entry.getKey());
-                                    serialize(psAtt, 3, entry.getValue());
-
-                                    psAtt.executeUpdate();
-                                }
-                            }
-
-                        }
-                    }
+            }
+            if (stmt.executeUpdate() != 1) throw new SQLException("JDBC session row was not written");
+        }
+        for (Map.Entry<String, byte[]> entry : attributes.entrySet()) {
+            String name = entry.getKey();
+            byte[] bytes = entry.getValue();
+            if (bytes == null) {
+                try (PreparedStatement stmt = connection.prepareStatement(deleteSessionAttributeQuery)) {
+                    stmt.setString(1, session.getId()); stmt.setString(2, name); stmt.executeUpdate();
                 }
-                connection.commit();
-            } catch (SQLException e) {
-                logger.error("SqlException:", e);
+            } else if (isNew) {
+                insertAttribute(connection, session.getId(), name, bytes);
+            } else {
+                int count;
+                try (PreparedStatement stmt = connection.prepareStatement(updateSessionAttributeQuery)) {
+                    stmt.setBlob(1, new ByteArrayInputStream(bytes), bytes.length);
+                    stmt.setString(2, session.getId()); stmt.setString(3, name);
+                    count = stmt.executeUpdate();
+                }
+                if (count == 0) insertAttribute(connection, session.getId(), name, bytes);
             }
         }
-        session.clearChangeFlags();
+    }
+
+    private void insertAttribute(Connection connection, String id, String name, byte[] bytes) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(createSessionAttributeQuery)) {
+            stmt.setString(1, id); stmt.setString(2, name);
+            stmt.setBlob(3, new ByteArrayInputStream(bytes), bytes.length);
+            stmt.executeUpdate();
+        }
     }
 
 
@@ -355,52 +359,58 @@ public class JdbcSessionRepository implements
                 getQuery(DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY);
     }
 
-    private void serialize(PreparedStatement ps, int paramIndex, Object attributeValue)
-            throws SQLException {
+    private Object deserialize(ResultSet rs, String columnName) throws SQLException {
+        InputStream stream = rs.getBinaryStream(columnName);
+        SerializationFailedException failure = null;
         try {
-            byte[] bytes = converter.serializer(attributeValue);
-            if (bytes != null) {
-                ps.setBlob(paramIndex, new ByteArrayInputStream(bytes), bytes.length);
-            } else {
-                ps.setBlob(paramIndex, (Blob) null);
-            }
+            return converter.deserializeStream(stream);
         } catch (SerializationFailedException e) {
-            throw new SQLException("Failed to serialize object ", e);
+            failure = e;
+            throw new InvalidSessionAttributeException(e);
+        } finally {
+            if (stream != null) {
+                try { stream.close(); } catch (IOException closeFailure) {
+                    if (failure != null) failure.addSuppressed(closeFailure);
+                    else logger.warn("JDBC attribute stream cleanup failed: {}", closeFailure.getClass().getSimpleName());
+                }
+            }
         }
-
     }
 
-    private Object deserialize(ResultSet rs, String columnName)
-            throws SQLException {
-        byte[] result = rs.getBytes(columnName);
-        try {
-            return converter.deserialize(result);
-        } catch (SerializationFailedException e) {
-            throw new SQLException("Failed to serialize object ", e);
+    private static final class InvalidSessionAttributeException extends SQLException {
+        private InvalidSessionAttributeException(SerializationFailedException cause) {
+            super("Rejected serialized JDBC session attribute", cause);
         }
     }
 
     public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
-        List<JdbcSession> sessions = new ArrayList<>();
+        Map<String, JdbcSession> sessions = new LinkedHashMap<>();
+        Set<String> rejected = new HashSet<>();
         while (rs.next()) {
             String id = rs.getString("SESSION_ID");
-            JdbcSession session;
-            if (sessions.size() > 0 && getLast(sessions).getId().equals(id)) {
-                session = getLast(sessions);
-            } else {
-                MapSession delegate = new MapSession(rs.getString("SESSION_ID"));
+            if (rejected.contains(id)) continue;
+            JdbcSession session = sessions.get(id);
+            if (session == null) {
+                MapSession delegate = new MapSession(id);
                 delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
                 delegate.setCreationTime(rs.getLong("CREATION_TIME"));
                 delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
                 session = new JdbcSession(delegate);
+                sessions.put(id, session);
             }
             String attributeName = rs.getString("ATTRIBUTE_NAME");
             if (attributeName != null) {
-                session.setAttribute(attributeName, deserialize(rs, "ATTRIBUTE_BYTES"));
+                try {
+                    // Hydration must not enter setAttribute()/save() or create dirty state.
+                    session.delegate.setAttribute(attributeName, deserialize(rs, "ATTRIBUTE_BYTES"));
+                } catch (InvalidSessionAttributeException e) {
+                    sessions.remove(id);
+                    rejected.add(id);
+                    logger.warn("Ignoring a JDBC session with a rejected serialized attribute");
+                }
             }
-            sessions.add(session);
         }
-        return sessions;
+        return new ArrayList<>(sessions.values());
     }
 
 
@@ -534,10 +544,6 @@ public class JdbcSessionRepository implements
 
     }
 
-
-    private JdbcSession getLast(List<JdbcSession> sessions) {
-        return sessions.get(sessions.size() - 1);
-    }
 
 
 }

@@ -8,20 +8,33 @@ import java.io.*;
 public class ValueBytesConverter {
 
 
+    private final int maxSerializedBytes;
     private final Deserializer<Object> deserializer;
     private final Serializer<Object> serializer;
 
     public ValueBytesConverter() {
-        this.deserializer = new DefaultDeserializer();
+        this.maxSerializedBytes = SerializedAttributeLimits.configuredMaxBytes();
+        this.deserializer = new DefaultDeserializer(maxSerializedBytes);
         this.serializer = new DefaultSerializer();
     }
 
 
 
-    public Object deserialize(byte[] source) throws SerializationFailedException{
-        ByteArrayInputStream byteStream = new ByteArrayInputStream(source);
+    public Object deserialize(byte[] source) throws SerializationFailedException {
+        if (source == null) {
+            throw new SerializationFailedException("Serialized session attribute must not be null");
+        }
+        if (source.length > maxSerializedBytes) {
+            throw new SerializationFailedException("Serialized session attribute must contain at most "
+                    + maxSerializedBytes + " bytes");
+        }
+        return deserializeStream(new ByteArrayInputStream(source));
+    }
+
+    /** Read one complete serialized attribute with a hard byte limit; caller owns the stream. */
+    public Object deserializeStream(InputStream source) throws SerializationFailedException {
         try {
-            return this.deserializer.deserialize(byteStream);
+            return this.deserializer.deserialize(source);
         }
         catch (Throwable ex) {
             throw new SerializationFailedException("Failed to deserialize payload. " +
@@ -31,7 +44,7 @@ public class ValueBytesConverter {
     }
 
     public byte[] serializer(Object source) throws SerializationFailedException{
-        ByteArrayOutputStream byteStream = new ByteArrayOutputStream(1024);
+        ByteArrayOutputStream byteStream = new AttributeOutputStream(maxSerializedBytes);
         try  {
             this.serializer.serialize(source, byteStream);
             return byteStream.toByteArray();
@@ -41,4 +54,34 @@ public class ValueBytesConverter {
                     this.serializer.getClass().getSimpleName(), ex);
         }
     }
+    /** Bound writes as well, so new persisted values always fit the reader's byte policy. */
+    private static final class AttributeOutputStream extends ByteArrayOutputStream {
+        private final int maxSerializedBytes;
+
+        private AttributeOutputStream(int maxSerializedBytes) {
+            super(Math.min(1024, maxSerializedBytes));
+            this.maxSerializedBytes = maxSerializedBytes;
+        }
+
+        @Override
+        public synchronized void write(int value) {
+            checkLength(1);
+            super.write(value);
+        }
+
+        @Override
+        public synchronized void write(byte[] bytes, int offset, int length) {
+            java.util.Objects.checkFromIndexSize(offset, length, bytes.length);
+            checkLength(length);
+            super.write(bytes, offset, length);
+        }
+
+        private void checkLength(int length) {
+            if (length > maxSerializedBytes - count) {
+                throw new IllegalArgumentException("Serialized session attribute exceeds "
+                        + maxSerializedBytes + " bytes");
+            }
+        }
+    }
+
 }
