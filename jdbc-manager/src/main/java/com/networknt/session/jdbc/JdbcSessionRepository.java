@@ -11,6 +11,8 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.sql.*;
 import java.util.*;
 
@@ -372,11 +374,10 @@ public class JdbcSessionRepository implements
 
     private Object deserialize(ResultSet rs, String columnName)
             throws SQLException {
-        byte[] result = rs.getBytes(columnName);
-        try {
-            return converter.deserialize(result);
-        } catch (SerializationFailedException e) {
-            throw new SQLException("Failed to serialize object ", e);
+        try (InputStream stream = rs.getBinaryStream(columnName)) {
+            return converter.deserializeStream(stream);
+        } catch (IOException | SerializationFailedException e) {
+            throw new SQLException("Failed to deserialize session attribute", e);
         }
     }
 
