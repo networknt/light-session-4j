@@ -100,3 +100,34 @@ mvn clean test
 Identify deployed artifacts, review allowlist/filter-factory and database controls,
 and rerun the partner scan before historical finding closure. A byte bound does
 not make arbitrary untrusted Java deserialization safe.
+
+## Aggregate resource budgets (A15 follow-up)
+
+[Issue #70](https://github.com/networknt/light-session-4j/issues/70) adds positive
+integer system properties captured when a repository is constructed:
+
+| Property prefix `light.session.jdbc.serialization.` | Default |
+| --- | ---: |
+| maxAttributes | 64 attributes per session |
+| maxSessionBytes | 4194304 serialized bytes per session |
+| maxListingBytes | 67108864 serialized bytes per result |
+| maxListingSessions | 1000 distinct session IDs, including rejected sessions |
+| maxListingRows | 65000 JDBC result rows |
+
+Existing per-attribute byte and object-graph/class restrictions still apply.
+Save validates all current attributes, including unchanged ones, before acquiring
+a connection. Aggregate rejection throws without clearing pending edits or writing
+rows. This preflight re-serializes unchanged attributes on writes; serializers
+must therefore support repeat serialization. It does not rewrite attributes on reads.
+
+Read hydration rejects the entire over-budget session while retaining healthy
+sessions. A listing that exceeds a listing budget throws IllegalStateException;
+it does not masquerade as an empty or partial successful result. Stream consumption
+is bounded before ObjectInputStream is constructed. Inventory existing sessions
+before upgrading; a previously accepted large session can now be unavailable.
+Raise limits only after reviewing the application's heap and database budgets.
+
+These are serialized-byte/count budgets, not an exact bound on decoded object
+heap, JVM/provider copies or a JDBC driver's internal buffering. getSessions still
+materializes its now-bounded result; use narrower application queries for larger
+inventories. No production-driver or live deployment qualification is implied.
