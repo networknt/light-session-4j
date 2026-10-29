@@ -1,5 +1,6 @@
 package com.networknt.session.jdbc.serializer;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InvalidClassException;
 import java.io.InputStream;
@@ -22,7 +23,9 @@ public class DefaultDeserializer implements Deserializer<Object> {
     private static final long MAX_ARRAY_LENGTH = 100_000;
     private static final long MAX_DEPTH = 20;
     private static final long MAX_REFERENCES = 10_000;
-    private static final long MAX_STREAM_BYTES = 1_048_576;
+    /** Maximum complete serialized attribute size, including stream headers. */
+    public static final int MAX_SERIALIZED_BYTES = 1_048_576;
+    private static final long MAX_STREAM_BYTES = MAX_SERIALIZED_BYTES;
     private static final Set<String> DEFAULT_ALLOWED_CLASSES = Set.of(
             "java.lang.String",
             "java.lang.Boolean",
@@ -91,15 +94,23 @@ public class DefaultDeserializer implements Deserializer<Object> {
 
     /**
      * Read from the supplied {@code InputStream} and deserialize the contents
-     * into an object.
+     * into an object. The input must be one complete finite serialized attribute;
+     * the caller remains responsible for closing the supplied stream.
      * @see ObjectInputStream#readObject()
      */
     @Override
-    @SuppressWarnings("resource")
     public Object deserialize(InputStream inputStream) throws IOException, SerializationFailedException {
-        ObjectInputStream objectInputStream = new ObjectInputStream(inputStream);
-        objectInputStream.setObjectInputFilter(this::validateObjectInput);
-        try {
+        if (inputStream == null) {
+            throw new SerializationFailedException("Serialized session attribute must not be null");
+        }
+        // ObjectInputFilter is not invoked for concrete strings. Validate the complete
+        // bounded input before any readObject hook or string allocation can occur.
+        byte[] bytes = inputStream.readNBytes(MAX_SERIALIZED_BYTES + 1);
+        if (bytes.length > MAX_SERIALIZED_BYTES) {
+            throw new SerializationFailedException("Serialized session attribute exceeds " + MAX_SERIALIZED_BYTES + " bytes");
+        }
+        try (ObjectInputStream objectInputStream = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+            objectInputStream.setObjectInputFilter(this::validateObjectInput);
             return objectInputStream.readObject();
         }
         catch (InvalidClassException ex) {
