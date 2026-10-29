@@ -1,71 +1,102 @@
 # JDBC session attribute serialization limits
 
-The default JDBC converter accepts at most **1,048,576 serialized bytes (1 MiB)**
-per attribute, including Java serialization headers and any trailing bytes. The
-same fixed limit applies to new converter writes. Values at the exact byte limit
-are permitted, provided the class allowlist and graph limits also permit them.
-No property enables larger values.
+The default byte limit is **1,048,576 serialized bytes (1 MiB) per attribute**,
+including Java serialization headers and trailing bytes. Both converter reads
+and writes use the same policy. The class allowlist and depth/reference/array
+filters remain in force independently of the byte limit.
 
-This closes the byte-limit gap in Checkmarx A15 (worksheet row 38): Java's
-ObjectInputFilter is not called for concrete strings, so checking streamBytes
-inside that filter did not prevent oversized strings/string arrays from loading.
-See [ObjectInputStream filtering](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/io/ObjectInputStream.html#setObjectInputFilter(java.io.ObjectInputFilter)).
+This addresses Checkmarx A15 (worksheet row 38): ObjectInputFilter does not inspect
+concretely encoded strings, so its former streamBytes check was not a hard byte
+bound. The reader now checks the complete bounded input before ObjectInputStream
+construction. See [ObjectInputStream filtering](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/io/ObjectInputStream.html#setObjectInputFilter(java.io.ObjectInputFilter)).
 
-## Read and write behavior
+## Configuring the byte policy
 
-- DefaultDeserializer reads at most limit + 1 bytes from one complete attribute
-  stream and rejects oversize before constructing ObjectInputStream. The existing
-  class allowlist and depth/reference/array checks still run for accepted inputs.
-- ValueBytesConverter.deserialize(byte[]) rejects oversized arrays before copying
-  or deserializing. The new deserializeStream method provides the same bounded
-  behavior without changing the existing byte-array method's signature.
-- JdbcSessionRepository uses ResultSet.getBinaryStream rather than getBytes and
-  closes the column stream on success or failure. Null/corrupt/oversized columns
-  fail through the checked SQL-exception path. Caller-supplied streams passed
-  directly to the converter/deserializer remain the caller's responsibility.
-- Converter serialization stops before its output accumulator exceeds the limit;
-  it cannot return an oversized value for insertion as an attribute. Oversize
-  produces SerializationFailedException. Existing repository error/transaction
-  handling is retained; this is not a new atomic-write guarantee.
+For a reviewed migration, set a JVM property before constructing the repository,
+converter or deserializer, for example:
 
-The input API now expects one complete finite serialized-attribute stream. It
-consumes through EOF (up to limit + 1), rather than leaving trailing stream data
-for another operation. The Java serialization format is unchanged for accepted
-attributes. Direct DefaultSerializer usage outside the JDBC converter is unchanged.
+```sh
+-Dlight.session.jdbc.serialization.maxAttributeBytes=4194304
+```
 
-## Upgrade and database boundaries
+The property accepts positive integers below Integer.MAX_VALUE; zero, negatives,
+empty/invalid values and overflow fail construction. There is no unlimited mode.
+The extra byte used to detect oversize is reserved without integer overflow.
+Each converter captures one limit for its reader and writer, so later property
+changes cannot make that instance's read/write policies disagree. Existing
+instances require recreation/restart to adopt a different limit. Direct
+DefaultDeserializer instances also capture their limit at construction.
 
-Previously persisted oversized attributes no longer load. Inventory their sizes
-without printing values, then invalidate/regenerate those sessions or migrate
-large application data out of session attributes before rollout. The existing
-repository catches SQL read failure and returns no loaded session; applications
-must handle that as their normal unavailable/invalid-session case. Enlarging the
-class/package allowlists does not disable this byte cap and remains a separate
+Raising the limit increases buffering and decoded-object memory demands. Size it
+against the application heap and JDBC driver behavior; use a temporary increase
+only with an approved migration plan, then restore the intended bound. Serialized
+size is not a bound on decoded heap size. Allowlist extensions remain a separate
 security-sensitive choice.
 
-The application stops consuming the JDBC stream after limit + 1 bytes. A JDBC
-driver may still buffer a column internally: this does not promise a driver-wide
-heap bound or server-side truncation. Review production drivers and consider an
-appropriate database-side attribute-size constraint. For PostgreSQL BYTEA, for
-example, review an octet_length(attribute_bytes) <= 1048576 constraint after
-checking existing rows. No schema migration or live database changes are applied
-by this PR. PostgreSQL/Oracle production-driver behavior was not qualified here.
+## Save and load behavior
+
+- The reader consumes at most limit + 1 bytes from one complete finite attribute
+  stream, rejecting oversize before deserialization hooks. Caller-supplied streams
+  remain caller-owned. The repository uses getBinaryStream rather than getBytes.
+- save() serializes all pending values before SQL changes. Serialization failure
+  throws IllegalStateException with its cause. A failed SQL transaction attempts
+  explicit rollback and throws; rollback errors are suppressed on the failure, and
+  pending edits/new flags are retained for correction/retry. A failed commit may
+  have an uncertain database outcome; reconcile that before retrying.
+  setAttribute(), removeAttribute() and createSession() may propagate that failure.
+  Failed saves leave pending in-memory edits; they do not claim those edits were
+  persisted. Change flags clear only after a successful commit. A connection-close
+  failure after a confirmed commit is logged without misreporting the write as failed.
+- Loads hydrate the underlying MapSession directly, without setAttribute()/save(),
+  reserialization, writes or dirty flags. Rows are grouped by session ID even when
+  not adjacent. If an attribute is oversized, corrupt, null or disallowed, its
+  entire session is omitted for that load, including previously hydrated attributes.
+  Healthy sessions remain available from getSessions(); findById() returns null for
+  the rejected session. No partially hydrated session escapes and no stored row is
+  automatically deleted. Query-level SQL failures retain the existing behavior.
+- Column streams are closed on success/failure. A close-only IOException after a
+  successful decode is logged without discarding the valid value. If decoding
+  failed, a close error is suppressed on the original failure.
+- The converter's output accumulator refuses oversized values before they can be
+  returned for insertion. Direct DefaultSerializer usage is unchanged. Accepted
+  attributes retain their Java serialization format.
+
+## Upgrade and remaining resource boundaries
+
+Previously stored oversized attributes may be omitted with their session. Inventory
+sizes without printing values, then invalidate/regenerate those sessions, move
+large application data out of session attributes, or use a reviewed temporary
+limit increase. Applications must handle unavailable sessions through their normal
+session-invalid/missing behavior. Preserve least-privilege database writes.
+
+**This remains a per-attribute policy.** There is no attribute-count limit,
+per-session aggregate byte/decoded-heap budget, or listing-wide memory limit.
+getSessions() still materializes its valid results. Aggregate budgets and a paginated
+listing API need a separate policy/API change; this PR does not claim to solve them.
+Write preflight also buffers all pending attributes, so applications must budget
+session size and edit volume accordingly.
+
+The application bounds stream consumption, but a JDBC driver may buffer a column
+internally. Review production drivers and database-side size constraints, such as
+an appropriate PostgreSQL octet_length(attribute_bytes) check after inspecting
+existing rows. No schema migration/live database change is applied here, and
+PostgreSQL/Oracle production-driver buffering is not qualified by H2 tests.
 
 ## Validation
 
-The regression tests exercise root/nested large strings, string arrays, exact
-boundaries, trailing bytes, write rejection, hooks blocked before execution,
-retained graph filters, caller stream ownership, bounded column consumption and
-JDBC stream cleanup/null/I/O failures. Existing H2-backed JDBC tests remain part
-of the suite. ResultSet stream probes are synthetic and do not connect to a live
-external database.
+The suite covers root/nested strings, string arrays, exact boundaries/trailing
+bytes, configurable policies, retained filters, hooks blocked before execution,
+stream ownership/cleanup, and null/corrupt/I/O failures. Public H2 repository tests
+exercise oversized setAttribute(), failed createSession(), explicit rollback after
+partial SQL work, correction/retry, mixed valid/rejected sessions and read-only
+hydration (including a custom writeObject counter). Existing H2 HTTP-session tests
+also run. No live external database or production session is used.
 
 ```sh
 mvn -pl jdbc-manager -am test
 mvn clean test
 ```
 
-This byte bound is an additional safeguard, not permission to deserialize arbitrary
-untrusted classes. Keep database writes least-privileged, review effective
-allowlist/filter-factory settings, identify the deployed artifact and rerun the
-partner scan before closing the historical finding.
+Identify deployed artifacts, review allowlist/filter-factory and database controls,
+and rerun the partner scan before historical finding closure. A byte bound does
+not make arbitrary untrusted Java deserialization safe.
