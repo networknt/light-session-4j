@@ -236,15 +236,11 @@ class JdbcSessionAggregateLimitTest {
     @Test void effectiveByteBudgetReportsTypedOutcome() throws Exception {
         var converter = new ValueBytesConverter();
         byte[] bytes = converter.serializer("value");
-        for (var reason : List.of(
-                com.networknt.session.jdbc.serializer.AttributeReadException.Reason.SESSION_BYTES,
-                com.networknt.session.jdbc.serializer.AttributeReadException.Reason.LISTING_BYTES)) {
-            var rejected = assertThrows(com.networknt.session.jdbc.serializer.AttributeReadException.class,
-                    () -> converter.deserializeStream(new java.io.ByteArrayInputStream(bytes), bytes.length - 1, reason));
-            assertEquals(reason, rejected.reason);
-            assertEquals(bytes.length, rejected.bytesRead);
-            assertEquals("value", converter.deserializeStream(new java.io.ByteArrayInputStream(bytes), bytes.length, reason).value());
-        }
+        var rejected = assertThrows(com.networknt.session.jdbc.serializer.AttributeReadException.class,
+                () -> converter.deserializeStream(new java.io.ByteArrayInputStream(bytes), bytes.length - 1));
+        assertEquals(com.networknt.session.jdbc.serializer.AttributeReadException.Reason.SESSION_BYTES, rejected.reason);
+        assertEquals(bytes.length, rejected.bytesRead);
+        assertEquals("value", converter.deserializeStream(new java.io.ByteArrayInputStream(bytes), bytes.length).value());
     }
 
     @Test void connectionStateIsRestoredAfterCommitBudgetRejectionAndSqlFailure() throws Exception {
@@ -391,6 +387,51 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(rejected.getMeasured() > rejected.getLimit());
         assertEquals(0, connections.get());
         assertTrue(session.isChanged());
+    }
+
+    @Test void listingChargesOnlyCompleteValidSessionsRegardlessOfAttributeOrSessionOrder() throws Exception {
+        var converter = new ValueBytesConverter();
+        byte[] prefix = converter.serializer("x".repeat(100));
+        byte[] good = converter.serializer("ok");
+        for (String reason : List.of("count", "bytes", "corrupt", "filter")) {
+            limit("maxAttributes", reason.equals("count") ? 1 : 64);
+            limit("maxSessionBytes", reason.equals("bytes") ? prefix.length : 4096);
+            limit("maxListingBytes", good.length);
+            byte[] last = switch (reason) {
+                case "corrupt" -> new byte[]{1, 2, 3};
+                case "filter" -> converter.serializer(new CountingValue());
+                default -> good;
+            };
+            for (boolean rejectedFirst : new boolean[]{true, false}) {
+                for (boolean invalidLast : new boolean[]{true, false}) {
+                    var ids = rejectedFirst ? List.of("bad", "bad", "good") : List.of("good", "bad", "bad");
+                    var bad = invalidLast ? List.of(prefix, last) : List.of(last, prefix);
+                    var values = rejectedFirst ? List.of(bad.get(0), bad.get(1), good) : List.of(good, bad.get(0), bad.get(1));
+                    var sessions = repository().extractData(listingRows(ids, values));
+                    assertEquals(1, sessions.size());
+                    assertEquals("good", sessions.getFirst().getId());
+                }
+            }
+        }
+    }
+
+    @Test void extractorRejectsInterleavedSessionsExplicitly() throws Exception {
+        byte[] value = new ValueBytesConverter().serializer("value");
+        assertThrows(SQLException.class, () -> repository().extractData(
+                listingRows(List.of("one", "two", "one"), List.of(value, value, value))));
+    }
+
+    private ResultSet listingRows(List<String> ids, List<byte[]> values) {
+        var index = new java.util.concurrent.atomic.AtomicInteger(-1);
+        return (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "next" -> index.incrementAndGet() < ids.size();
+                    case "getString" -> args[0].equals("SESSION_ID") ? ids.get(index.get()) : "attribute-" + index.get();
+                    case "getInt" -> 1800;
+                    case "getLong" -> System.currentTimeMillis();
+                    case "getBinaryStream" -> new java.io.ByteArrayInputStream(values.get(index.get()));
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
     }
 
     @Test void invalidBudgetFailsConstruction() {

@@ -103,16 +103,15 @@ public class DefaultDeserializer implements Deserializer<Object> {
      */
     @Override
     public Object deserialize(InputStream inputStream) throws IOException, SerializationFailedException {
-        return deserializeBounded(inputStream, maxSerializedBytes, AttributeReadException.Reason.ATTRIBUTE_BYTES).value();
+        return deserializeBounded(inputStream, maxSerializedBytes).value();
     }
 
     public record DecodedAttribute(Object value, int bytes) { }
 
-    public DecodedAttribute deserializeBounded(InputStream inputStream, int budget,
-                                              AttributeReadException.Reason budgetReason) throws IOException, SerializationFailedException {
+    public DecodedAttribute deserializeBounded(InputStream inputStream, int budget) throws IOException, SerializationFailedException {
         int effective = Math.min(maxSerializedBytes, budget);
         AttributeReadException.Reason reason = maxSerializedBytes <= budget
-                ? AttributeReadException.Reason.ATTRIBUTE_BYTES : budgetReason;
+                ? AttributeReadException.Reason.ATTRIBUTE_BYTES : AttributeReadException.Reason.SESSION_BYTES;
         if (inputStream == null) throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, 0, null);
         // One bounded read owns all byte accounting. Hooks only see the resulting buffer.
         byte[] bytes = inputStream.readNBytes(effective + 1);

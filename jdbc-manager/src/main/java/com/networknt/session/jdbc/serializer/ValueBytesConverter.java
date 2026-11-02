@@ -33,13 +33,12 @@ public class ValueBytesConverter {
 
     /** Read one complete serialized attribute with a hard byte limit; caller owns the stream. */
     public Object deserializeStream(InputStream source) throws SerializationFailedException {
-        return deserializeStream(source, maxSerializedBytes, AttributeReadException.Reason.ATTRIBUTE_BYTES).value();
+        return deserializeStream(source, maxSerializedBytes).value();
     }
 
-    public DefaultDeserializer.DecodedAttribute deserializeStream(InputStream source, int budget,
-                                                                  AttributeReadException.Reason reason) throws SerializationFailedException {
+    public DefaultDeserializer.DecodedAttribute deserializeStream(InputStream source, int budget) throws SerializationFailedException {
         try {
-            return deserializer.deserializeBounded(source, budget, reason);
+            return deserializer.deserializeBounded(source, budget);
         } catch (SerializationFailedException ex) {
             throw ex;
         } catch (Throwable ex) {
