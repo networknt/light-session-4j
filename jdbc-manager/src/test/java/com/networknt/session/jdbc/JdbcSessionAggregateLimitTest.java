@@ -425,12 +425,71 @@ class JdbcSessionAggregateLimitTest {
         assertEquals(List.of("two"), sessions.stream().map(s -> s.getId()).toList());
     }
 
-    @Test void incompleteSessionStagingHasAnIndependentBound() throws Exception {
-        byte[] value = new ValueBytesConverter().serializer("value");
-        limit("maxSessionBytes", value.length * 2); limit("maxListingBytes", value.length);
-        var failure = assertThrows(IllegalStateException.class, () -> repository().extractData(
-                listingRows(List.of("one", "two", "three", "four"), List.of(value, value, value, value))));
-        assertTrue(failure.getMessage().contains("staging bytes"));
+    @Test void interleavedLateRejectionsPastTheOldCeilingLeaveTheValidListingAvailable() throws Exception {
+        var converter = new ValueBytesConverter();
+        byte[] prefix = converter.serializer("x".repeat(100));
+        byte[] good = converter.serializer("ok");
+        byte[] filtered = converter.serializer(new CountingValue());
+        int sessionBudget = prefix.length + Math.max(filtered.length, good.length);
+        limit("maxSessionBytes", sessionBudget); limit("maxListingBytes", good.length);
+        assertTrue(prefix.length * 8 > sessionBudget + good.length, "Prefixes must exceed the removed staging ceiling");
+        for (String reason : List.of("count", "bytes", "corrupt", "filter")) {
+            limit("maxAttributes", reason.equals("count") ? 1 : 64);
+            byte[] last = switch (reason) {
+                case "corrupt" -> new byte[]{1, 2, 3};
+                case "filter" -> filtered;
+                case "bytes" -> converter.serializer("x".repeat(sessionBudget));
+                default -> good;
+            };
+            List<String> ids = new ArrayList<>(); List<byte[]> values = new ArrayList<>();
+            for (int i = 0; i < 8; i++) { ids.add("bad-" + i); values.add(prefix); }
+            ids.add("good"); values.add(good);
+            for (int i = 0; i < 8; i++) { ids.add("bad-" + i); values.add(last); }
+            for (int order = 0; order < 3; order++) {
+                if (order == 1) { Collections.reverse(ids); Collections.reverse(values); }
+                if (order == 2) {
+                    List<Integer> indices = new ArrayList<>(); for (int i = 0; i < ids.size(); i++) indices.add(i);
+                    Collections.shuffle(indices, new Random(17));
+                    var oldIds = new ArrayList<>(ids); var oldValues = new ArrayList<>(values);
+                    for (int i = 0; i < ids.size(); i++) { ids.set(i, oldIds.get(indices.get(i))); values.set(i, oldValues.get(indices.get(i))); }
+                }
+                var sessions = repository().extractData(listingRows(ids, values));
+                assertEquals(List.of("good"), sessions.stream().map(v -> v.getId()).toList(), reason + " order=" + order);
+            }
+        }
+    }
+
+    @Test void listingDecodesOnlyAfterAllRowsAndNeverReserializesStagedValues() throws Exception {
+        String property = com.networknt.session.jdbc.serializer.DefaultDeserializer.ALLOWED_CLASSES_PROPERTY;
+        String previous = System.getProperty(property);
+        ReadCountingValue.reads = 0; ReadCountingValue.writes = 0;
+        try {
+            System.setProperty(property, ReadCountingValue.class.getName());
+            var converter = new ValueBytesConverter();
+            byte[] custom = converter.serializer(new ReadCountingValue());
+            byte[] string = converter.serializer("healthy");
+            ResultSet rows = listingRows(List.of("one", "two", "one"), List.of(custom, string, string));
+            ResultSet tracked = (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("next")) assertEquals(0, ReadCountingValue.reads);
+                        return invoke(rows, method, args);
+                    });
+            assertEquals(2, repository().extractData(tracked).size());
+            assertEquals(1, ReadCountingValue.reads); assertEquals(1, ReadCountingValue.writes);
+        } finally {
+            if (previous == null) System.clearProperty(property); else System.setProperty(property, previous);
+        }
+    }
+
+    private static final class ReadCountingValue implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        static int reads, writes;
+        private void readObject(java.io.ObjectInputStream stream) throws java.io.IOException, ClassNotFoundException {
+            reads++; stream.defaultReadObject();
+        }
+        private void writeObject(java.io.ObjectOutputStream stream) throws java.io.IOException {
+            writes++; stream.defaultWriteObject();
+        }
     }
 
     private ResultSet listingRows(List<String> ids, List<byte[]> values) {

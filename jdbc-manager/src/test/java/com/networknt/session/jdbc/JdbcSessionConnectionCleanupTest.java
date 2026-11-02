@@ -9,6 +9,7 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Scripted JDBC failures: tests repository ordering/cleanup, not vendor implementations. */
+@org.junit.jupiter.api.parallel.Isolated
 class JdbcSessionConnectionCleanupTest {
     @Test void rollbackFailureAbortsWithoutPotentiallyCommittingByRestoringSettings() {
         Stub jdbc = new Stub(); jdbc.writeFailure = true; jdbc.rollbackFailure = true;
@@ -87,10 +88,12 @@ class JdbcSessionConnectionCleanupTest {
         assertEquals(2, unknown.blobBinds); assertEquals(0, unknown.streamBinds);
     }
 
-    @Test void compatiblePostgresDriverAndExplicitOverrideDoNotUseBlobBinding() {
-        Stub compatible = new Stub(); compatible.product = "Compatible server"; compatible.driver = "PostgreSQL JDBC Driver";
+    @Test void driverIdentityDoesNotOverrideTheServerAndInternalOverrideSkipsDetection() {
+        Stub compatible = new Stub(); compatible.product = "MySQL"; compatible.driver = "PostgreSQL JDBC Driver";
         var repo = compatible.repository(); repo.save(existing(repo));
-        assertEquals(2, compatible.streamBinds); assertEquals(0, compatible.blobBinds);
+        assertEquals(0, compatible.streamBinds); assertEquals(2, compatible.blobBinds);
+        assertTrue(compatible.queries.stream().anyMatch(q -> q.contains("SUM(OCTET_LENGTH")));
+        assertFalse(compatible.queries.stream().anyMatch(q -> q.contains("DBMS_LOB")));
         Stub override = new Stub(); override.product = "Custom proxy";
         repo = override.repository(JdbcSessionDialect.POSTGRESQL); repo.save(existing(repo));
         assertEquals(2, override.streamBinds); assertEquals(0, override.metadataGets);
@@ -100,9 +103,48 @@ class JdbcSessionConnectionCleanupTest {
         for (String product : List.of("MySQL", "MariaDB", "DB2/LINUXX8664")) {
             Stub jdbc = new Stub(); jdbc.product = product;
             var repo = jdbc.repository(); repo.save(existing(repo));
-            String function = product.startsWith("DB2") ? "SUM(LENGTH(ATTRIBUTE_BYTES))" : "SUM(OCTET_LENGTH(ATTRIBUTE_BYTES))";
+            String function = product.startsWith("DB2") ? "SUM(CAST(LENGTH(ATTRIBUTE_BYTES) AS BIGINT))" : "SUM(OCTET_LENGTH(ATTRIBUTE_BYTES))";
             assertTrue(jdbc.queries.stream().anyMatch(q -> q.contains(function)));
             assertEquals(0, jdbc.blobLengths);
+        }
+    }
+
+    @Test void ambiguousSubstringsDoNotSelectVendorSql() {
+        for (String name : List.of("Not Oracle", "postgres imitation", "Some oracle proxy", "Oracle MySQL Compatible")) {
+            Stub jdbc = new Stub(); jdbc.product = name; jdbc.driver = "PostgreSQL JDBC Driver";
+            var repo = jdbc.repository(); repo.save(existing(repo));
+            assertTrue(jdbc.queries.contains(JdbcSessionDialect.BLOB_LENGTHS));
+            assertEquals(0, jdbc.streamBinds);
+        }
+    }
+
+    @Test void db2WideningPrecedesSumAndBudgetReportingRetainsTheLongTotal() {
+        Stub jdbc = new Stub(); jdbc.product = "DB2/LINUXX8664"; jdbc.aggregateBytes = (long) Integer.MAX_VALUE + 1;
+        var repo = jdbc.repository();
+        var failure = assertThrows(SessionBudgetExceededException.class, () -> repo.save(existing(repo)));
+        assertEquals(jdbc.aggregateBytes, failure.getMeasured());
+        assertTrue(jdbc.queries.stream().anyMatch(q -> q.contains("SUM(CAST(LENGTH(ATTRIBUTE_BYTES) AS BIGINT))")));
+        assertEquals(1, jdbc.rollbacks);
+    }
+
+    @Test void configurationSelectsDialectWithoutExpandingThePublicConstructorApi() {
+        String previous = System.getProperty(JdbcSessionDialect.PROPERTY);
+        try {
+            System.setProperty(JdbcSessionDialect.PROPERTY, "postgresql");
+            Stub jdbc = new Stub(); jdbc.product = "Custom proxy";
+            var repo = jdbc.repository();
+            System.setProperty(JdbcSessionDialect.PROPERTY, "mysql");
+            repo.save(existing(repo));
+            assertEquals(2, jdbc.streamBinds); assertEquals(0, jdbc.metadataGets);
+            System.setProperty(JdbcSessionDialect.PROPERTY, "not-a-dialect");
+            assertThrows(IllegalArgumentException.class, jdbc::repository);
+            var constructors = JdbcSessionRepository.class.getConstructors();
+            assertEquals(1, constructors.length);
+            assertArrayEquals(new Class<?>[]{DataSource.class}, constructors[0].getParameterTypes());
+            assertFalse(java.lang.reflect.Modifier.isPublic(JdbcSessionDialect.class.getModifiers()));
+        } finally {
+            if (previous == null) System.clearProperty(JdbcSessionDialect.PROPERTY);
+            else System.setProperty(JdbcSessionDialect.PROPERTY, previous);
         }
     }
 
@@ -118,6 +160,7 @@ class JdbcSessionConnectionCleanupTest {
         boolean writeFailure, rollbackFailure, abortFailure, restoreIsolationFailure, restoreAutoFailure;
         String product = "H2", driver = "Generic JDBC";
         int aborts, commits, rollbacks, metadataGets, isolationGets, blobBinds, streamBinds, blobLengths, blobFrees;
+        long aggregateBytes = 1;
         final List<String> queries = new ArrayList<>();
         final List<Integer> isolationSets = new ArrayList<>();
         final List<Boolean> autoCommitSets = new ArrayList<>();
@@ -132,7 +175,7 @@ class JdbcSessionConnectionCleanupTest {
                 if (method.equals("getConnection")) return connection();
                 throw new AssertionError(method);
             });
-            return new JdbcSessionRepository(ds, override);
+            return override == null ? new JdbcSessionRepository(ds) : new JdbcSessionRepository(ds, override);
         }
 
         Connection connection() {
@@ -185,7 +228,7 @@ class JdbcSessionConnectionCleanupTest {
             boolean[] next = {true};
             return proxy(ResultSet.class, (method, args) -> switch (method) {
                 case "next" -> { boolean result = next[0]; next[0] = false; yield result; }
-                case "getLong" -> 1L;
+                case "getLong" -> args[0].equals("SESSION_BYTES") ? aggregateBytes : 1L;
                 case "getBlob" -> proxy(Blob.class, (m, a) -> switch (m) {
                     case "length" -> { blobLengths++; yield 1L; }
                     case "free" -> { blobFrees++; yield null; }

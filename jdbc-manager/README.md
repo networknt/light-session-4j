@@ -121,30 +121,32 @@ jointly commit an over-budget session. All writers must follow this parent-row
 locking protocol; direct external attribute writes are outside this guarantee.
 Unchanged objects are neither reserialized nor rewritten. Database capabilities are
 cached lazily without holding a repository monitor over metadata I/O; concurrent
-first use may detect the same immutable enum more than once. A DataSource must
-still target one database family. Detection recognizes PostgreSQL driver identity
-as well as product names, so compatible servers need not report exactly PostgreSQL.
-MySQL and MariaDB use OCTET_LENGTH, Db2 uses LENGTH on binary columns, and the
-existing PostgreSQL/H2, Oracle and SQL Server scalar policies remain available.
-Each optimized check returns one count/byte-total row under the parent lock.
-Empty new sessions and saves without attribute changes skip validation.
+first use may detect the same immutable internal policy more than once. Automatic
+selection uses exact canonical server identities and explicit known aliases, not
+substring matches or the wire-protocol driver name. A DataSource must target one
+database family. Unknown identities retain the warned BLOB-locator fallback.
 
-For nonstandard proxies or metadata, select a policy explicitly rather than relying
-on name detection, for example:
+For configuration-driven deployments with nonstandard server metadata, set a JVM
+property before constructing the repository:
 
-```java
-new JdbcSessionRepository(dataSource, JdbcSessionDialect.POSTGRESQL);
+```sh
+-Dlight.session.jdbc.databaseDialect=postgresql
 ```
 
-An unrecognized product/driver logs a warning before retaining the JDBC BLOB-locator
-fallback (Blob.length()/Blob.free()). Locator materialization remains driver-dependent;
-this fallback is not a claim of efficient validation on every driver. PostgreSQL
-BYTEA uses binary-stream binding; other policies retain setBlob. Explicit BLOB
-selection is available for SQL BLOB storage. SQL/driver behavior for Oracle, SQL
-Server, MySQL, MariaDB and Db2 is covered by scripted contract tests, not live-driver
-qualification. See the vendor [Db2 LENGTH](https://www.ibm.com/docs/en/db2/11.5.x?topic=functions-length)
-and [MariaDB OCTET_LENGTH](https://mariadb.com/docs/server/reference/sql-functions/string-functions/octet_length)
-definitions for binary byte-length semantics.
+Values are auto (the default), postgresql, oracle, sql-server, h2, mysql, mariadb,
+db2, and blob. Invalid values fail construction. This setting is captured once,
+like the byte policies; no public dialect enum or additional public constructor is
+introduced. The existing JdbcSessionRepository(DataSource) constructor is unchanged.
+A PostgreSQL protocol driver alone cannot establish a server's SQL capabilities.
+
+MySQL/MariaDB and PostgreSQL/H2 use OCTET_LENGTH, Oracle uses DBMS_LOB.GETLENGTH,
+and SQL Server uses CAST(DATALENGTH(...) AS BIGINT). Db2 widens each LENGTH to
+BIGINT *before* SUM to prevent INTEGER aggregate overflow. Each optimized check
+returns one count/byte-total row under the parent lock. Empty new sessions and saves
+without attribute changes skip validation. The blob override selects Blob.length()/
+Blob.free() locator validation; materialization remains driver-dependent. PostgreSQL
+BYTEA uses binary-stream binding; other policies retain setBlob. Non-H2/PostgreSQL
+SQL and binding behavior has scripted coverage only, not live-driver qualification.
 
 Only saves that need stored validation inspect isolation and temporarily select
 READ_COMMITTED if necessary. The original isolation is restored only when changed.
@@ -162,25 +164,32 @@ sessions. Listing budgets apply only to getSessions()/extractData(), independent
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
-The public extractData(ResultSet) helper accepts interleaved session IDs. Hydration
-tracks each session independently and checks the final listing byte total only after
-all rows have determined which sessions are valid. Valid prefixes from ultimately
-rejected sessions do not consume the final result budget. Attribute-byte limits
-still take precedence over session-byte limits on an exact tie.
+The public extractData(ResultSet) helper accepts interleaved session IDs. Listing
+hydration first stages bounded raw attributes, without running object hooks, in an
+extraction-local encrypted temporary file. Once all rows establish the complete
+sessions, it decrypts and decodes one session at a time. Only a fully valid session
+is charged to maxListingBytes. Late count, byte, corrupt-data or filter rejection
+therefore cannot exhaust a prefix-staging RAM ceiling or charge rejected data to
+the final listing, regardless of row order. Values are decoded once and never
+reserialized on this path. Lookup remains a direct streaming pass with no staging
+file. The listing query still has no ORDER BY requirement.
 
-To bound provisional data without ordering or a database-wide BLOB-row sort, live
-staged serialized-size accounting is capped at maxListingBytes + maxSessionBytes.
-One additional attribute read buffer is bounded by the remaining session/per-attribute
-ceiling plus one sentinel byte. Rejection releases that session's staged accounting.
-Staging excess is reported distinctly as "staging bytes"; it can refuse a stream
-with too many unfinished sessions even if future rows would reject some of them.
-This is a work-memory ceiling, separate from the final valid-result byte limit.
-Row and distinct-session limits also include rejected sessions. These serialized
-size budgets are not exact decoded-heap or driver-buffering bounds.
+This trades temporary-file I/O for bounded Java payload retention: accepted results
+plus one candidate session and per-attribute read/crypto buffers. Ciphertext uses
+AES-GCM with a fresh extraction-only key; each record is authenticated and bound to
+its file offset. No cleartext session data or key material is written to the file.
+Files are created lazily, owner-only on POSIX, opened with DELETE_ON_CLOSE, and
+closed on success or failure. Empty listings do not create a file.
 
-The production listing query has no ORDER BY and the extractor imposes no ordering
-requirement. Application budgets bound consumption, not every database query plan's
-upstream work; this change adds no schema migration or index requirement.
+The encrypted payload's disk upper bound is maxListingSessions × maxSessionBytes
+plus 28 × maxListingRows bytes of nonce/tag overhead (filesystem allocation overhead
+is separate). Rejected prefixes can remain in that file until close. There is no
+smaller, row-order-dependent staging policy limit. The temporary filesystem must
+have capacity for the configured budgets; java.io.tmpdir selects its location.
+Filesystem/crypto failures fail the entire listing explicitly, without a partial
+successful result. Decoded heap, filesystem cache/tmpfs RAM and JDBC driver buffers
+are not exact serialized-byte quantities. Row and distinct-session ceilings include
+rejected sessions and continue to bound traversal and staging volume.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
@@ -197,7 +206,9 @@ inventories. No production-driver or live deployment qualification is implied.
 
 The PostgreSQL contract exercises concurrent inserts, growing UPDATEs, removal-plus-add
 deltas, BYTEA streamed lookup, lookup row limits, healthy/rejected listings, and the
-public extractor on deliberately interleaved rows. A separate OID fixture exercises
+public extractor on deliberately interleaved rows. An additional regression places
+eight rejected sessions' prefixes before their corrupt rows, exceeding the removed
+RAM ceiling while leaving only a small valid result. A separate OID fixture exercises
 real large-object locator budget validation (not general PostgreSQL OID session-read
 support). Test-owned large objects are unlinked before dropping that fixture schema.
 Connections return to SERIALIZABLE and autocommit after commits and budget rollbacks.
@@ -211,10 +222,10 @@ mvn -pl jdbc-manager -am -Pjdbc-postgres-tests \
 ```
 
 The normal local suite skips this test and does not open PostgreSQL connections.
-The narrow, path-filtered JDBC session contracts job runs on PRs targeting master
-or 2.x only, alongside H2 and scripted JDBC tests. It has no default-branch push
-trigger. Action commits and the disposable PostgreSQL image are pinned to verified
-SHAs/digest in [.github/workflows/jdbc-tests.yml](../.github/workflows/jdbc-tests.yml). The PostgreSQL driver version is managed in
+The JDBC session contracts job runs on every PR targeting master or 2.x, and after
+pushes/merges to those branches. It has no path filters that could skip a required
+check. setup-java uses the verified v6.1.0 release; action commits and the disposable
+PostgreSQL image are pinned to SHAs/digest in [.github/workflows/jdbc-tests.yml](../.github/workflows/jdbc-tests.yml). The PostgreSQL driver version is managed in
 the parent POM. The default suite tests Oracle/SQL Server SQL selection and binding,
 unknown-product fallback, settings-call counts, and rollback/restore/abort failures
 through scripted JDBC objects; those tests do not qualify vendor drivers. Local

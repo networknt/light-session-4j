@@ -1,9 +1,11 @@
 package com.networknt.session.jdbc;
 
+import com.networknt.session.jdbc.serializer.SerializedAttributeLimits;
 import static com.networknt.session.jdbc.serializer.SerializedAttributeLimits.configuredPositive;
 
 /** Construction-time serialized-data budgets; these do not measure decoded JVM heap. */
 final class JdbcSessionLimits {
+    final int attributeBytes = configuredPositive("maxAttributeBytes", SerializedAttributeLimits.DEFAULT_MAX_BYTES);
     final int attributes = configuredPositive("maxAttributes", 64);
     final int sessionBytes = configuredPositive("maxSessionBytes", 4 * 1024 * 1024);
     final int listingBytes = configuredPositive("maxListingBytes", 64 * 1024 * 1024);

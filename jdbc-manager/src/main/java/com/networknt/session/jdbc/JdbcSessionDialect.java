@@ -4,15 +4,15 @@ import java.io.ByteArrayInputStream;
 import java.sql.*;
 import java.util.Locale;
 
-/** Database capabilities. Select explicitly when a proxy/server reports nonstandard metadata. */
-public enum JdbcSessionDialect {
+/** Internal database capabilities; configuration overrides are captured at repository construction. */
+enum JdbcSessionDialect {
     POSTGRESQL("OCTET_LENGTH(ATTRIBUTE_BYTES)", true),
     ORACLE("DBMS_LOB.GETLENGTH(ATTRIBUTE_BYTES)", false),
     SQL_SERVER("CAST(DATALENGTH(ATTRIBUTE_BYTES) AS BIGINT)", false),
     H2("OCTET_LENGTH(ATTRIBUTE_BYTES)", false),
     MYSQL("OCTET_LENGTH(ATTRIBUTE_BYTES)", false),
     MARIADB("OCTET_LENGTH(ATTRIBUTE_BYTES)", false),
-    DB2("LENGTH(ATTRIBUTE_BYTES)", false),
+    DB2("CAST(LENGTH(ATTRIBUTE_BYTES) AS BIGINT)", false),
     BLOB(null, false);
 
     static final String BLOB_LENGTHS = "SELECT ATTRIBUTE_BYTES FROM light_session_attributes WHERE SESSION_ID = ?";
@@ -28,21 +28,32 @@ public enum JdbcSessionDialect {
         this.binaryStream = binaryStream;
     }
 
-    static JdbcSessionDialect detect(DatabaseMetaData metadata) throws SQLException {
-        String product = normalize(metadata.getDatabaseProductName());
-        String driver = normalize(metadata.getDriverName());
-        // PostgreSQL driver identity survives compatible servers reporting a different product name.
-        if (product.contains("postgres") || driver.contains("postgresql")) return POSTGRESQL;
-        if (product.contains("oracle")) return ORACLE;
-        if (product.contains("sql server")) return SQL_SERVER;
-        if (product.equals("h2") || product.startsWith("h2 ")) return H2;
-        if (product.contains("mariadb")) return MARIADB;
-        if (product.contains("mysql")) return MYSQL;
-        if (product.contains("db2")) return DB2;
-        return BLOB;
+    static final String PROPERTY = "light.session.jdbc.databaseDialect";
+
+    static JdbcSessionDialect configured() {
+        String value = System.getProperty(PROPERTY);
+        if (value == null || value.trim().equalsIgnoreCase("auto")) return null;
+        try { return valueOf(value.trim().toUpperCase(Locale.ROOT).replace('-', '_')); }
+        catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(PROPERTY + " must be auto, postgresql, oracle, sql-server, h2, mysql, mariadb, db2 or blob");
+        }
     }
 
-    private static String normalize(String value) { return value == null ? "" : value.trim().toLowerCase(Locale.ROOT); }
+    static JdbcSessionDialect detect(DatabaseMetaData metadata) throws SQLException {
+        String product = metadata.getDatabaseProductName();
+        String name = product == null ? "" : product.trim().toLowerCase(Locale.ROOT);
+        // Server identities select SQL; a wire-protocol driver does not identify the server.
+        return switch (name) {
+            case "postgresql" -> POSTGRESQL;
+            case "oracle", "oracle database" -> ORACLE;
+            case "microsoft sql server", "sql server" -> SQL_SERVER;
+            case "h2" -> H2;
+            case "mysql" -> MYSQL;
+            case "mariadb" -> MARIADB;
+            case "db2", "db2/linuxx8664", "db2/aix64", "db2/nt64" -> DB2;
+            default -> BLOB;
+        };
+    }
 
     void bind(PreparedStatement stmt, int index, byte[] bytes) throws SQLException {
         ByteArrayInputStream stream = new ByteArrayInputStream(bytes);
