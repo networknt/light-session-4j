@@ -179,20 +179,45 @@ partial results; cleanup-only cursor/connection failures are logged after succes
 reads and do not discard valid data.
 
 The public extractData(ResultSet) compatibility helper is deprecated. It preserves
-arbitrary interleaved IDs, applies row and distinct-session caps while streaming,
-and checks the byte total of valid sessions after all rows are processed. Rejected
-sessions still count toward the distinct-session ceiling. It shares per-session
-hydration with repository reads and does not retain raw serialized buffers.
-Incomplete candidates can coexist until EOF, so peak serialized-equivalent retention
-is bounded by maxListingSessions × maxSessionBytes, rather than maxListingBytes.
-Prefer getSessions(), which retains the accepted result plus one candidate.
+arbitrary interleaved IDs and enforces row, distinct-session and retained-byte caps
+while streaming. The byte cap includes incomplete candidates, and rejected IDs still
+count toward the distinct-session ceiling. Rejecting a candidate releases its retained
+bytes; if earlier rows already exceed maxListingBytes, extraction fails immediately,
+even if later rows would reject those candidates. This is a deliberate fail-fast
+retention policy for caller-owned unordered cursors. Use getSessions() when only
+complete valid sessions should consume the listing byte budget.
+The helper retains at most maxListingBytes of serialized-equivalent candidates plus
+one bounded attribute being hydrated, not maxListingSessions × maxSessionBytes.
+Decoded JVM heap and driver/serializer buffers remain distinct from serialized sizes.
 Neither path uses temporary files, spill storage, or encryption machinery.
 
-Expiry timestamps use milliseconds: last-access time plus the timeout in seconds
-multiplied by 1000. A negative timeout stores Long.MAX_VALUE (never expires).
-Request access updates both last-access and expiry in one statement using the stored
-timeout; creates and saves also write the corrected expiry. Existing rows are
-corrected when saved or accessed; this change does not migrate historical timestamps.
+Expiry timestamps use milliseconds: last-access time plus timeout seconds × 1000.
+A negative timeout stores Long.MAX_VALUE (never expires). Loaded-session access
+calculates expiry in Java and binds last-access/expiry values in a plain two-column
+UPDATE. The compatibility updateSessionLastAccessTime(id) method first reads just the
+stored timeout; normal loaded-session access needs no timeout query or SQL arithmetic.
+
+### Upgrade existing expiry timestamps
+
+Before enabling listing or expiry cleanup on the corrected version, stop old-version
+writers and expiry cleanup, and run the following idempotent statement in a maintenance
+transaction. It recomputes expiry for **all existing rows**, including untouched live,
+expired and non-expiring sessions, from their authoritative access time and timeout.
+Then commit and start the corrected version. The same statement ships as
+[migrations/fix_session_expiry_milliseconds.sql](src/main/resources/migrations/fix_session_expiry_milliseconds.sql).
+No automatic startup migration runs.
+
+```sql
+UPDATE light_session
+SET EXPIRY_TIME = CASE
+    WHEN MAX_INACTIVE_INTERVAL < 0 THEN 9223372036854775807
+    ELSE LAST_ACCESS_TIME + CAST(MAX_INACTIVE_INTERVAL AS DECIMAL(19, 0)) * 1000
+END;
+```
+
+The migration is exercised on H2 and PostgreSQL. Validate it with the deployment's
+schema and driver before upgrading other database products; this is not live-driver
+qualification for Oracle, SQL Server or Db2.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
@@ -209,9 +234,9 @@ inventories. No production-driver or live deployment qualification is implied.
 
 The PostgreSQL contract exercises concurrent inserts, growing UPDATEs, removal-plus-add
 deltas, BYTEA streamed lookup, lookup row limits, healthy/rejected listings, and the
-public extractor on deliberately interleaved rows. An additional regression places
-eight rejected sessions' prefixes before their corrupt rows, exceeding the removed
-RAM ceiling while leaving only a small valid result. A separate OID fixture exercises
+public extractor on deliberately interleaved rows. An additional regression verifies
+that native listing tolerates large rejected prefixes while the deprecated helper
+fails at its retained-byte ceiling. A separate OID fixture exercises
 real large-object locator budget validation (not general PostgreSQL OID session-read
 support). Test-owned large objects are unlinked before dropping that fixture schema.
 Connections return to SERIALIZABLE and autocommit after commits and budget rollbacks.

@@ -156,9 +156,32 @@ class JdbcSessionPostgresBudgetTest {
             try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery(
                     "SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, A.ATTRIBUTE_NAME, A.ATTRIBUTE_BYTES " +
                     "FROM light_session S JOIN light_session_attributes A ON S.SESSION_ID = A.SESSION_ID ORDER BY A.ATTRIBUTE_NAME")) {
-                var loaded = repo.extractData(rows);
-                assertEquals(List.of(healthy.getId()), loaded.stream().map(v -> v.getId()).toList());
+                var failure = assertThrows(IllegalStateException.class, () -> repo.extractData(rows));
+                assertTrue(failure.getMessage().endsWith("bytes"), "Unordered helper must enforce retention before late corrupt rows");
             }
+        });
+    }
+
+    @Test void expiryMigrationRepairsUntouchedRowsBeforeCleanup() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var repo = new JdbcSessionRepository(fixture.source());
+            var active = repo.createSession(); active.setLastAccessedTime(System.currentTimeMillis() - 5_000);
+            var never = repo.createSession(); never.setMaxInactiveInterval(-1); repo.save(never); never.setLastAccessedTime(1);
+            var expired = repo.createSession(); expired.setMaxInactiveInterval(1); repo.save(expired);
+            expired.setLastAccessedTime(System.currentTimeMillis() - 5_000);
+            try (Statement stmt = fixture.admin().createStatement()) {
+                stmt.executeUpdate("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL");
+                assertFalse(repo.getSessions().containsKey(active.getId()));
+                String migration;
+                try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
+                    assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                }
+                assertEquals(3, stmt.executeUpdate(migration));
+                assertEquals(3, stmt.executeUpdate(migration));
+            }
+            repo.cleanUpExpiredSessions();
+            assertEquals(Set.of(active.getId(), never.getId()), repo.getSessions().keySet());
+            assertNotNull(repo.findById(active.getId())); assertNull(repo.findById(expired.getId()));
         });
     }
 
