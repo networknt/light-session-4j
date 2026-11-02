@@ -114,6 +114,7 @@ class JdbcSessionAggregateLimitTest {
                 new Class<?>[]{ResultSet.class}, (proxy, method, args) -> switch (method.getName()) {
                     case "next" -> !row.getAndSet(true);
                     case "getString" -> args[0].equals("SESSION_ID") ? "oversized" : "attribute";
+                    case "close" -> null;
                     case "getInt" -> 1800;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> stream;
@@ -333,12 +334,12 @@ class JdbcSessionAggregateLimitTest {
         limit("maxAttributes", 2);
         var nextCalls = new java.util.concurrent.atomic.AtomicInteger();
         ResultSet rows = syntheticRows(nextCalls, List.of(new byte[]{1, 2, 3}), true);
-        assertTrue(repository().extractData(rows, false).isEmpty());
+        assertNull(lookupRows(rows).findById("session"));
         assertEquals(1, nextCalls.get());
         nextCalls.set(0);
         byte[] value = new ValueBytesConverter().serializer("valid");
         rows = syntheticRows(nextCalls, List.of(value), true);
-        assertTrue(repository().extractData(rows, false).isEmpty());
+        assertNull(lookupRows(rows).findById("session"));
         assertEquals(3, nextCalls.get());
     }
 
@@ -362,11 +363,31 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(repository().extractData(syntheticRows(new java.util.concurrent.atomic.AtomicInteger(), List.of(oversized), false)).isEmpty());
     }
 
+    private JdbcSessionRepository lookupRows(ResultSet rows) {
+        PreparedStatement statement = (PreparedStatement) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                (p, m, a) -> switch (m.getName()) {
+                    case "executeQuery" -> rows;
+                    case "setMaxRows" -> { assertEquals(3, a[0]); yield null; }
+                    case "setString", "close" -> null;
+                    default -> throw new UnsupportedOperationException(m.getName());
+                });
+        Connection connection = (Connection) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                (p, m, a) -> switch (m.getName()) {
+                    case "prepareStatement" -> statement;
+                    case "close" -> null;
+                    default -> throw new UnsupportedOperationException(m.getName());
+                });
+        javax.sql.DataSource source = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class},
+                (p, m, a) -> connection);
+        return new JdbcSessionRepository(source);
+    }
+
     private ResultSet syntheticRows(java.util.concurrent.atomic.AtomicInteger nextCalls, List<byte[]> bytes, boolean sameSession) {
         return (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "next" -> nextCalls.incrementAndGet() <= (sameSession ? 100_000 : bytes.size());
                     case "getString" -> args[0].equals("SESSION_ID") ? (sameSession ? "session" : "session-" + nextCalls.get()) : "attribute-" + nextCalls.get();
+                    case "close" -> null;
                     case "getInt" -> 1800;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> new java.io.ByteArrayInputStream(bytes.get(sameSession ? 0 : nextCalls.get() - 1));
@@ -390,7 +411,7 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(session.isChanged());
     }
 
-    @Test void listingChargesOnlyCompleteValidSessionsRegardlessOfAttributeOrSessionOrder() throws Exception {
+    @Test void legacyMapperDropsInvalidSessionsInEitherOrder() throws Exception {
         var converter = new ValueBytesConverter();
         byte[] prefix = converter.serializer("x".repeat(100));
         byte[] good = converter.serializer("ok");
@@ -426,14 +447,13 @@ class JdbcSessionAggregateLimitTest {
         assertEquals(List.of("two"), sessions.stream().map(s -> s.getId()).toList());
     }
 
-    @Test void interleavedLateRejectionsPastTheOldCeilingLeaveTheValidListingAvailable() throws Exception {
+    @Test void legacyMapperPreservesInterleavedLateRejections() throws Exception {
         var converter = new ValueBytesConverter();
         byte[] prefix = converter.serializer("x".repeat(100));
         byte[] good = converter.serializer("ok");
         byte[] filtered = converter.serializer(new CountingValue());
         int sessionBudget = prefix.length + Math.max(filtered.length, good.length);
         limit("maxSessionBytes", sessionBudget); limit("maxListingBytes", good.length);
-        assertTrue(prefix.length * 8 > sessionBudget + good.length, "Prefixes must exceed the removed staging ceiling");
         for (String reason : List.of("count", "bytes", "corrupt", "filter")) {
             limit("maxAttributes", reason.equals("count") ? 1 : 64);
             byte[] last = switch (reason) {
@@ -460,47 +480,13 @@ class JdbcSessionAggregateLimitTest {
         }
     }
 
-    @Test void listingDecodesOnlyAfterAllRowsAndNeverReserializesStagedValues() throws Exception {
-        String property = com.networknt.session.jdbc.serializer.DefaultDeserializer.ALLOWED_CLASSES_PROPERTY;
-        String previous = System.getProperty(property);
-        ReadCountingValue.reads = 0; ReadCountingValue.writes = 0;
-        try {
-            System.setProperty(property, ReadCountingValue.class.getName());
-            var converter = new ValueBytesConverter();
-            byte[] custom = converter.serializer(new ReadCountingValue());
-            byte[] string = converter.serializer("healthy");
-            ResultSet rows = listingRows(List.of("one", "two", "one"), List.of(custom, string, string));
-            ResultSet tracked = (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
-                    (proxy, method, args) -> {
-                        if (method.getName().equals("next")) assertEquals(0, ReadCountingValue.reads);
-                        return invoke(rows, method, args);
-                    });
-            assertEquals(2, repository().extractData(tracked).size());
-            assertEquals(1, ReadCountingValue.reads); assertEquals(1, ReadCountingValue.writes);
-        } finally {
-            if (previous == null) System.clearProperty(property); else System.setProperty(property, previous);
-        }
-    }
-
-    private static final class ReadCountingValue implements java.io.Serializable {
-        private static final long serialVersionUID = 1L;
-        static int reads, writes;
-        private void readObject(java.io.ObjectInputStream stream) throws java.io.IOException, ClassNotFoundException {
-            reads++; stream.defaultReadObject();
-        }
-        private void writeObject(java.io.ObjectOutputStream stream) throws java.io.IOException {
-            writes++; stream.defaultWriteObject();
-        }
-    }
 
     @Test void nativeListingAndSmallExtractionDoNotDependOnTheTempDirectory() throws Exception {
         java.nio.file.Path unavailable = unavailableDirectory();
         String previous = System.getProperty("java.io.tmpdir");
         try {
             System.setProperty("java.io.tmpdir", unavailable.toString());
-            var repo = new JdbcSessionRepository(database) {
-                @Override JdbcSessionStaging newStaging() { throw new AssertionError("Native listing must not stage payloads"); }
-            };
+            var repo = new JdbcSessionRepository(database);
             repo.setDefaultMaxInactiveInterval(60_000);
             var session = repo.createSession(); session.setAttribute("a", "healthy");
             assertEquals(Set.of(session.getId()), repo.getSessions().keySet());
@@ -509,56 +495,9 @@ class JdbcSessionAggregateLimitTest {
         } finally { restoreTempDirectory(previous); }
     }
 
-    @Test void largeUnorderedExtractionReportsAnUnavailableSpillDirectory() throws Exception {
-        String previous = System.getProperty("java.io.tmpdir");
-        byte[] value = new ValueBytesConverter().serializer("value");
-        limit("maxSessionBytes", value.length * 2); limit("maxListingBytes", value.length);
-        try {
-            System.setProperty("java.io.tmpdir", unavailableDirectory().toString());
-            var failure = assertThrows(IllegalStateException.class, () -> repository().extractData(
-                    listingRows(List.of("one", "two", "three", "four"), List.of(value, value, value, value))));
-            assertTrue(failure.getMessage().contains("Unable to stage"));
-            assertInstanceOf(java.io.IOException.class, failure.getCause());
-        } finally { restoreTempDirectory(previous); }
-    }
 
-    @Test void listingLimitDuringRawExtractionClosesSpilledStorage() throws Exception {
-        limit("maxListingRows", 1);
-        boolean[] closed = {false};
-        JdbcSessionStaging staging = new JdbcSessionStaging(temporaryDirectory, 0) {
-            @Override public void close() throws java.io.IOException { try { super.close(); } finally { closed[0] = true; } }
-        };
-        var repo = stagingRepository(staging);
-        byte[] value = new ValueBytesConverter().serializer("value");
-        var failure = assertThrows(IllegalStateException.class, () -> repo.extractData(
-                listingRows(List.of("one", "two"), List.of(value, value))));
-        assertTrue(failure.getMessage().contains("rows")); assertTrue(closed[0]);
-        assertNoStagingFiles();
-    }
 
-    @Test void cleanupOnlyFailurePreservesACompleteListingAndLogsIt() throws Exception {
-        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(JdbcSessionRepository.class);
-        var events = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
-        events.start(); logger.addAppender(events);
-        try {
-            var repo = stagingRepository(failingCloseStaging());
-            byte[] value = new ValueBytesConverter().serializer("value");
-            assertEquals(1, repo.extractData(listingRows(List.of("one"), List.of(value))).size());
-            assertTrue(events.list.stream().anyMatch(e -> e.getFormattedMessage().contains("staging cleanup failed")));
-        } finally { logger.detachAppender(events); events.stop(); }
-        assertNoStagingFiles();
-    }
 
-    @Test void cleanupFailureDoesNotReplaceThePrimaryListingLimit() throws Exception {
-        limit("maxListingBytes", 1);
-        var repo = stagingRepository(failingCloseStaging());
-        byte[] value = new ValueBytesConverter().serializer("value");
-        var failure = assertThrows(IllegalStateException.class, () -> repo.extractData(listingRows(List.of("one"), List.of(value))));
-        assertTrue(failure.getMessage().contains("limits: bytes"));
-        assertEquals(1, failure.getSuppressed().length);
-        assertInstanceOf(java.io.IOException.class, failure.getSuppressed()[0]);
-        assertNoStagingFiles();
-    }
 
     @Test void nativeListingKeepsACompleteResultAfterConnectionOrCursorCloseFailure() throws Exception {
         var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
@@ -624,26 +563,95 @@ class JdbcSessionAggregateLimitTest {
         assertEquals(2, reads.get());
     }
 
-    private JdbcSessionStaging failingCloseStaging() {
-        return new JdbcSessionStaging(temporaryDirectory, 0) {
-            @Override public void close() throws java.io.IOException { super.close(); throw new java.io.IOException("synthetic close failure"); }
-        };
+    @FunctionalInterface
+    private interface DatabaseChange { void run() throws Exception; }
+
+    /** Run the change after the ID cursor closes, before any payload query. */
+    private javax.sql.DataSource listingSource(DatabaseChange change, java.util.concurrent.atomic.AtomicInteger prepares,
+                                              java.util.concurrent.atomic.AtomicInteger reads, java.util.concurrent.atomic.AtomicInteger idRows,
+                                              java.util.concurrent.atomic.AtomicInteger idMaxRows) {
+        return (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class},
+                (p, m, a) -> {
+                    if (!m.getName().equals("getConnection")) return invoke(database, m, a);
+                    Connection connection = database.getConnection();
+                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                        Object result = invoke(connection, cm, ca);
+                        if (!cm.getName().equals("prepareStatement")) return result;
+                        boolean ids = ca[0].toString().startsWith("SELECT SESSION_ID FROM");
+                        if (!ids) prepares.incrementAndGet();
+                        PreparedStatement statement = (PreparedStatement) result;
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                            if (ids && sm.getName().equals("setMaxRows")) idMaxRows.set((Integer) sa[0]);
+                            Object value = invoke(statement, sm, sa);
+                            if (!sm.getName().equals("executeQuery")) return value;
+                            if (!ids) { reads.incrementAndGet(); return value; }
+                            ResultSet rows = (ResultSet) value;
+                            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class}, (rp, rm, ra) -> {
+                                Object read = invoke(rows, rm, ra);
+                                if (rm.getName().equals("next") && Boolean.TRUE.equals(read)) idRows.incrementAndGet();
+                                if (rm.getName().equals("close")) change.run();
+                                return read;
+                            });
+                        });
+                    });
+                });
     }
 
-    private JdbcSessionRepository stagingRepository(JdbcSessionStaging staging) {
-        return new JdbcSessionRepository(database) {
-            @Override JdbcSessionStaging newStaging() { return staging; }
-        };
+    @Test void listingReusesOneStatementAndObservesChangesAfterIdSelection() throws Exception {
+        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var deleted = writer.createSession(); deleted.setAttribute("a", "deleted");
+        var expired = writer.createSession(); expired.setAttribute("a", "expired");
+        var refreshed = writer.createSession(); refreshed.setAttribute("a", "old");
+        var rewritten = writer.createSession(); rewritten.setAttribute("a", "old");
+        var rejected = writer.createSession(); rejected.setAttribute("a", "old");
+        limit("maxAttributes", 1);
+        var prepares = new java.util.concurrent.atomic.AtomicInteger();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var source = listingSource(() -> {
+            try (Connection connection = database.getConnection()) {
+                try (PreparedStatement stmt = connection.prepareStatement("DELETE FROM light_session WHERE SESSION_ID = ?")) {
+                    stmt.setString(1, deleted.getId()); stmt.executeUpdate();
+                }
+                try (PreparedStatement stmt = connection.prepareStatement("UPDATE light_session SET EXPIRY_TIME = ?, LAST_ACCESS_TIME = ? WHERE SESSION_ID = ?")) {
+                    stmt.setLong(1, 0); stmt.setLong(2, 0); stmt.setString(3, expired.getId()); stmt.executeUpdate();
+                    long now = System.currentTimeMillis();
+                    stmt.setLong(1, now + 120_000); stmt.setLong(2, now); stmt.setString(3, refreshed.getId()); stmt.executeUpdate();
+                }
+                try (PreparedStatement stmt = connection.prepareStatement("UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? WHERE SESSION_ID = ?")) {
+                    stmt.setBytes(1, new ValueBytesConverter().serializer("fresh"));
+                    stmt.setString(2, rewritten.getId()); stmt.executeUpdate();
+                }
+            }
+            attribute(rejected.getId(), "extra", "over count");
+        }, prepares, reads, new java.util.concurrent.atomic.AtomicInteger(), new java.util.concurrent.atomic.AtomicInteger());
+        var sessions = new JdbcSessionRepository(source).getSessions();
+        assertEquals(Set.of(refreshed.getId(), rewritten.getId()), sessions.keySet());
+        assertEquals("fresh", sessions.get(rewritten.getId()).getAttribute("a"));
+        assertEquals("old", sessions.get(refreshed.getId()).getAttribute("a"));
+        assertTrue(sessions.get(refreshed.getId()).getLastAccessedTime() >= refreshed.getLastAccessedTime());
+        assertEquals(1, prepares.get());
+        assertEquals(5, reads.get(), "Deleted and expired IDs are also rebound on the same statement");
+    }
+
+    @Test void sessionLimitUsesSentinelRowBeforePreparingAnyPayloadStatement() throws Exception {
+        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        for (int i = 0; i < 4; i++) writer.createSession();
+        limit("maxListingSessions", 2);
+        var prepares = new java.util.concurrent.atomic.AtomicInteger();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var idRows = new java.util.concurrent.atomic.AtomicInteger();
+        var maxRows = new java.util.concurrent.atomic.AtomicInteger();
+        var source = listingSource(() -> {}, prepares, reads, idRows, maxRows);
+        var failure = assertThrows(IllegalStateException.class, () -> new JdbcSessionRepository(source).getSessions());
+        assertTrue(failure.getMessage().endsWith("sessions"));
+        assertEquals(3, maxRows.get()); assertEquals(3, idRows.get());
+        assertEquals(0, prepares.get()); assertEquals(0, reads.get());
     }
 
     private java.nio.file.Path unavailableDirectory() throws Exception {
         java.nio.file.Path path = temporaryDirectory.resolve("not-a-directory");
         java.nio.file.Files.writeString(path, "marker");
         return path;
-    }
-
-    private void assertNoStagingFiles() throws Exception {
-        try (var files = java.nio.file.Files.list(temporaryDirectory)) { assertEquals(0, files.count()); }
     }
 
     private static void restoreTempDirectory(String previous) {
@@ -656,6 +664,7 @@ class JdbcSessionAggregateLimitTest {
                 (proxy, method, args) -> switch (method.getName()) {
                     case "next" -> index.incrementAndGet() < ids.size();
                     case "getString" -> args[0].equals("SESSION_ID") ? ids.get(index.get()) : "attribute-" + index.get();
+                    case "close" -> null;
                     case "getInt" -> 1800;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> new java.io.ByteArrayInputStream(values.get(index.get()));
