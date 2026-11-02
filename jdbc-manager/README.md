@@ -48,8 +48,8 @@ security-sensitive choice.
   persisted. Change flags clear only after a successful commit. A connection-close
   failure after a confirmed commit is logged without misreporting the write as failed.
 - Loads hydrate the underlying MapSession directly, without setAttribute()/save(),
-  reserialization, writes or dirty flags. Rows are grouped by session ID even when
-  not adjacent. If an attribute is oversized, corrupt, null or disallowed, its
+  reserialization, writes or dirty flags. The listing query orders rows by session
+  ID so each entire session is validated before admission to the listing. If an attribute is oversized, corrupt, null or disallowed, its
   entire session is omitted for that load, including previously hydrated attributes.
   Healthy sessions remain available from getSessions(); findById() returns null for
   the rejected session. No partially hydrated session escapes and no stored row is
@@ -119,16 +119,26 @@ stored attribute count and serialized lengths before commit. An over-budget resu
 back with pending edits retained. Concurrent repository writers therefore cannot
 jointly commit an over-budget session. All writers must follow this parent-row
 locking protocol; direct external attribute writes are outside this guarantee.
-Unchanged objects are neither reserialized nor rewritten. Validation returns one
-scalar count/byte-total row using COUNT and SUM(OCTET_LENGTH) for PostgreSQL/H2;
-Oracle uses SUM(DBMS_LOB.GETLENGTH). No attribute payload is read back through JDBC.
-The database still evaluates the aggregate while holding the parent lock. Empty
-new sessions and saves without attribute changes skip the aggregate query.
-Saves temporarily use READ_COMMITTED so validation sees earlier writers after the
-parent lock. Original isolation/autocommit are restored after commit or rollback.
-Cleanup failures are suppressed on the original save failure, or logged following
-a confirmed commit. If rollback fails, the connection is aborted instead of changing
-transaction settings that might implicitly commit unresolved work.
+Unchanged objects are neither reserialized nor rewritten. Database capabilities are
+captured lazily once per repository; its DataSource must target one database product.
+PostgreSQL/H2 use COUNT and SUM(OCTET_LENGTH), Oracle uses SUM(DBMS_LOB.GETLENGTH),
+and SQL Server uses SUM(CAST(DATALENGTH(...) AS BIGINT)). SQL Server's
+[DATALENGTH](https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql)
+counts bytes of binary values. Other JDBC BLOB databases use a portable fallback:
+a bounded number of BLOB locators, Blob.length(), and Blob.free(), without reading
+payload streams. Driver-internal BLOB materialization remains driver-dependent.
+Known scalar queries transfer one count/byte-total row; the database evaluates the
+aggregate while holding the parent lock. Empty new sessions and saves without
+attribute changes skip validation. PostgreSQL BYTEA writes use setBinaryStream;
+other products retain the original setBlob binding, including Oracle BLOB writes.
+
+Only saves that need stored validation inspect isolation and temporarily select
+READ_COMMITTED if necessary. The original isolation is restored only when changed.
+Autocommit is inspected per borrowed connection (it cannot safely be cached across
+a pool), and changed/restored only when originally enabled. After commit/rollback,
+restoration failures are suppressed on the original save failure, or logged after
+a confirmed commit. Failed rollback or restoration aborts the connection; an
+unresolved transaction never has settings changed that might implicitly commit it.
 Session count/byte write rejections are SessionBudgetExceededException (an
 IllegalStateException) with typed reason, measured size and limit; pending edits
 remain available for correction.
@@ -138,14 +148,24 @@ sessions. Listing budgets apply only to getSessions()/extractData(), independent
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
-An attribute is decoded within the attribute/session byte ceiling before charging
-successful hydration to the listing byte budget. Intrinsic byte/filter/corruption
-rejections therefore drop that session even when listing space is smaller or tied.
-Attribute-byte limits take precedence over session-byte limits on an exact tie.
-Previously hydrated bytes are released from listing accounting when their session
-is rejected. Listing validation can hold one additional attribute scratch buffer
-(up to min(maxAttributeBytes, remaining session bytes) + 1), independent of the
-remaining listing budget; decoded heap still has no exact byte bound.
+A complete session is decoded within its attribute/session ceilings before it is
+charged to the listing byte budget. A valid prefix that exceeds remaining listing
+space therefore cannot fail the listing if a later attribute rejects that session.
+Whole valid sessions alone consume the result budget. Admission is independent of
+attribute order and session order. Attribute-byte limits take precedence over
+session-byte limits on an exact tie.
+
+The public extractData(ResultSet) helper now requires rows contiguous by session
+ID, matching the repository's ORDER BY query. Interleaved session IDs throw
+SQLException explicitly. Callers of that helper must order their input accordingly;
+it no longer accepts interleaved groups. This lets hydration retain a bounded
+listing plus one candidate session and one bounded attribute read buffer rather
+than buffering every incomplete session. The candidate is limited by
+maxSessionBytes, its read buffer by the remaining session/per-attribute ceiling
+plus one sentinel byte. These are serialized-size accounting limits, not exact
+bounds on decoded heap. The listed row/session-count budgets include rejected
+sessions and continue to bound traversal.
+
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
 is bounded before ObjectInputStream is constructed. Inventory existing sessions
@@ -171,6 +191,12 @@ mvn -pl jdbc-manager -am -Pjdbc-postgres-tests \
   -Dtest=JdbcSessionPostgresBudgetTest -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
-The normal suite skips this test and does not open PostgreSQL connections. Local
+The normal local suite skips this test and does not open PostgreSQL connections.
+The JDBC session contracts GitHub Actions job provisions a disposable PostgreSQL 18
+service and runs this profile on both target branches' PRs, alongside the H2 and
+scripted JDBC failure/dialect tests. The PostgreSQL driver version is managed in
+the parent POM. The default suite tests Oracle/SQL Server SQL selection and binding,
+unknown-product fallback, settings-call counts, and rollback/restore/abort failures
+through scripted JDBC objects; those tests do not qualify vendor drivers. Local
 PostgreSQL qualification does not establish Oracle driver behavior, production
 pool behavior, or deployment readiness.

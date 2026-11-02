@@ -1,0 +1,46 @@
+name: JDBC session contracts
+on:
+  pull_request:
+    branches: [master, 2.x]
+    paths:
+      - 'jdbc-manager/**'
+      - 'session-core/**'
+      - 'pom.xml'
+      - '.github/workflows/jdbc-tests.yml'
+  push:
+    branches: [master, 2.x]
+    paths:
+      - 'jdbc-manager/**'
+      - 'session-core/**'
+      - 'pom.xml'
+      - '.github/workflows/jdbc-tests.yml'
+permissions:
+  contents: read
+jobs:
+  jdbc-contracts:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: budget
+          POSTGRES_PASSWORD: budget
+          POSTGRES_DB: budget
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Run H2, failure-path and PostgreSQL contracts
+        run: >-
+          mvn -B -pl jdbc-manager -am -Pjdbc-postgres-tests
+          '-DjdbcPostgresUrl=jdbc:postgresql://127.0.0.1:5432/budget?user=budget&password=budget'
+          test

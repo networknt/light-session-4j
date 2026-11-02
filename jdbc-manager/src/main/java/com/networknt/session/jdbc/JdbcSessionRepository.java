@@ -12,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.*;
@@ -62,13 +61,6 @@ public class JdbcSessionRepository implements
             "INSERT INTO light_session(SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME) " +
                     "VALUES (?, ?, ?, ?, ?, ?)";
 
-    private static final String SESSION_BUDGET_QUERY =
-            "SELECT COUNT(*) AS ATTRIBUTE_COUNT, COALESCE(SUM(OCTET_LENGTH(ATTRIBUTE_BYTES)), 0) AS SESSION_BYTES " +
-                    "FROM light_session_attributes WHERE SESSION_ID = ?";
-    private static final String ORACLE_SESSION_BUDGET_QUERY =
-            "SELECT COUNT(*) AS ATTRIBUTE_COUNT, COALESCE(SUM(DBMS_LOB.GETLENGTH(ATTRIBUTE_BYTES)), 0) AS SESSION_BYTES " +
-                    "FROM light_session_attributes WHERE SESSION_ID = ?";
-
     private static final String CREATE_SESSION_ATTRIBUTE_QUERY =
             "INSERT INTO light_session_attributes(SESSION_ID, ATTRIBUTE_NAME, ATTRIBUTE_BYTES) " +
                     "VALUES (?, ?, ?)";
@@ -83,7 +75,7 @@ public class JdbcSessionRepository implements
             "SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
                     "FROM light_session S " +
                     "LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
-                    "WHERE EXPIRY_TIME > ?";
+                    "WHERE EXPIRY_TIME > ? ORDER BY S.SESSION_ID";
 
     private static final String UPDATE_SESSION_QUERY =
             "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
@@ -121,8 +113,7 @@ public class JdbcSessionRepository implements
     private static final Logger logger = LoggerFactory.getLogger(JdbcSessionRepository.class);
 
 
-    private String sessionBudgetQuery;
-    private String oracleSessionBudgetQuery;
+    private volatile JdbcSessionDialect dialect;
     private String createSessionQuery;
     private String createSessionAttributeQuery;
     private String getSessionQuery;
@@ -216,19 +207,24 @@ public class JdbcSessionRepository implements
 
         boolean committed = false;
         try (Connection connection = dataSource.getConnection()) {
-            int isolation = connection.getTransactionIsolation();
-            boolean autoCommit = connection.getAutoCommit();
+            boolean validate = !session.isNew() && !attributes.isEmpty();
+            Integer isolationToRestore = null;
+            boolean autoCommitToRestore = connection.getAutoCommit();
             Throwable failure = null;
             boolean transactionStarted = false;
             boolean transactionEnded = true;
             try {
                 // The statement after acquiring the parent lock must see the previous writer.
-                if (isolation != Connection.TRANSACTION_READ_COMMITTED)
-                    connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-                if (autoCommit) connection.setAutoCommit(false);
+                if (validate) {
+                    int isolation = connection.getTransactionIsolation();
+                    if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+                        isolationToRestore = isolation;
+                        connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                    }
+                }
+                if (autoCommitToRestore) connection.setAutoCommit(false);
                 transactionStarted = true;
                 transactionEnded = false;
-                boolean validate = !session.isNew() && !attributes.isEmpty();
                 writeSession(connection, session, attributes);
                 if (validate) validateStoredBudget(connection, session.getId());
                 connection.commit();
@@ -244,7 +240,7 @@ public class JdbcSessionRepository implements
                 throw e;
             } finally {
                 try {
-                    if (transactionEnded) restoreConnection(connection, isolation, autoCommit);
+                    if (transactionEnded) restoreConnection(connection, isolationToRestore, autoCommitToRestore);
                     // Changing isolation/autocommit with an unresolved transaction could commit it.
                     else connection.abort(Runnable::run);
                 } catch (SQLException cleanupFailure) {
@@ -292,7 +288,7 @@ public class JdbcSessionRepository implements
             } else {
                 int count;
                 try (PreparedStatement stmt = connection.prepareStatement(updateSessionAttributeQuery)) {
-                    stmt.setBinaryStream(1, new ByteArrayInputStream(bytes), bytes.length);
+                    dialect(connection).bind(stmt, 1, bytes);
                     stmt.setString(2, session.getId()); stmt.setString(3, name);
                     count = stmt.executeUpdate();
                 }
@@ -301,40 +297,70 @@ public class JdbcSessionRepository implements
         }
     }
 
-    private static void restoreConnection(Connection connection, int isolation, boolean autoCommit) throws SQLException {
+    private static void restoreConnection(Connection connection, Integer isolation, boolean autoCommit) throws SQLException {
         SQLException failure = null;
-        try { connection.setTransactionIsolation(isolation); }
+        try { if (isolation != null) connection.setTransactionIsolation(isolation); }
         catch (SQLException e) { failure = e; }
-        try { connection.setAutoCommit(autoCommit); }
+        try { if (autoCommit) connection.setAutoCommit(true); }
         catch (SQLException e) {
             if (failure == null) failure = e;
             else failure.addSuppressed(e);
         }
-        if (failure != null) throw failure;
+        if (failure != null) {
+            try { connection.abort(Runnable::run); }
+            catch (SQLException abortFailure) { failure.addSuppressed(abortFailure); }
+            throw failure;
+        }
     }
 
     /** The parent update holds its row lock until this aggregate check and commit finish. */
     private void validateStoredBudget(Connection connection, String id) throws SQLException {
-        String query = "Oracle".equals(connection.getMetaData().getDatabaseProductName())
-                ? oracleSessionBudgetQuery : sessionBudgetQuery;
+        JdbcSessionDialect capabilities = dialect(connection);
+        String query = getQuery(capabilities.budgetQuery);
         try (PreparedStatement stmt = connection.prepareStatement(query)) {
             stmt.setString(1, id);
             try (ResultSet rows = stmt.executeQuery()) {
-                if (!rows.next()) throw new SQLException("Missing JDBC session budget result");
-                long count = rows.getLong("ATTRIBUTE_COUNT");
-                long bytes = rows.getLong("SESSION_BYTES");
-                if (count > limits.attributes)
-                    throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT, count, limits.attributes);
-                if (bytes > limits.sessionBytes)
-                    throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.SESSION_BYTES, bytes, limits.sessionBytes);
+                if (capabilities.usesBlobLengths()) {
+                    long count = 0;
+                    long bytes = 0;
+                    while (rows.next()) {
+                        checkStoredBudget(++count, bytes);
+                        Blob blob = rows.getBlob(1);
+                        if (blob != null) {
+                            try { bytes += blob.length(); } finally { blob.free(); }
+                        }
+                        checkStoredBudget(count, bytes);
+                    }
+                } else {
+                    if (!rows.next()) throw new SQLException("Missing JDBC session budget result");
+                    checkStoredBudget(rows.getLong("ATTRIBUTE_COUNT"), rows.getLong("SESSION_BYTES"));
+                }
             }
         }
+    }
+
+    private void checkStoredBudget(long count, long bytes) {
+        if (count > limits.attributes)
+            throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT, count, limits.attributes);
+        if (bytes > limits.sessionBytes)
+            throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.SESSION_BYTES, bytes, limits.sessionBytes);
+    }
+
+    private JdbcSessionDialect dialect(Connection connection) throws SQLException {
+        JdbcSessionDialect result = dialect;
+        if (result == null) {
+            synchronized (this) {
+                result = dialect;
+                if (result == null) dialect = result = JdbcSessionDialect.forProduct(connection.getMetaData().getDatabaseProductName());
+            }
+        }
+        return result;
     }
 
     private void insertAttribute(Connection connection, String id, String name, byte[] bytes) throws SQLException {
         try (PreparedStatement stmt = connection.prepareStatement(createSessionAttributeQuery)) {
             stmt.setString(1, id); stmt.setString(2, name);
-            stmt.setBinaryStream(3, new ByteArrayInputStream(bytes), bytes.length);
+            dialect(connection).bind(stmt, 3, bytes);
             stmt.executeUpdate();
         }
     }
@@ -419,8 +445,6 @@ public class JdbcSessionRepository implements
     }
 
     private void prepareQueries() {
-        this.sessionBudgetQuery = getQuery(SESSION_BUDGET_QUERY);
-        this.oracleSessionBudgetQuery = getQuery(ORACLE_SESSION_BUDGET_QUERY);
         this.createSessionQuery = getQuery(CREATE_SESSION_QUERY);
         this.createSessionAttributeQuery = getQuery(CREATE_SESSION_ATTRIBUTE_QUERY);
         this.getSessionQuery = getQuery(GET_SESSION_QUERY);
@@ -435,11 +459,11 @@ public class JdbcSessionRepository implements
                 getQuery(DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY);
     }
 
-    private DecodedAttribute deserialize(ResultSet rs, int budget, AttributeReadException.Reason reason) throws SQLException, SerializationFailedException {
+    private DecodedAttribute deserialize(ResultSet rs, int budget) throws SQLException, SerializationFailedException {
         InputStream stream = rs.getBinaryStream("ATTRIBUTE_BYTES");
         SerializationFailedException failure = null;
         try {
-            return converter.deserializeStream(stream, budget, reason);
+            return converter.deserializeStream(stream, budget);
         } catch (SerializationFailedException e) {
             failure = e;
             throw e;
@@ -470,64 +494,64 @@ public class JdbcSessionRepository implements
         }
     }
 
+    /** Rows must be contiguous by session ID (as in the repository's ORDER BY query). */
     public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
         return extractData(rs, true);
     }
 
     List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
-        Map<String, Hydration> states = new LinkedHashMap<>();
+        Set<String> completed = new HashSet<>();
+        List<JdbcSession> sessions = new ArrayList<>();
+        Hydration state = null;
+        String currentId = null;
         long listingBytes = 0;
         int rows = 0;
         while (rs.next()) {
             if (listing && ++rows > limits.rows) throw new ListingLimitException("rows");
-            // A lookup can contain at most maxAttributes valid rows plus one rejection row.
-            if (!listing && ++rows > (long) limits.attributes + 1) return Collections.emptyList();
             String id = rs.getString("SESSION_ID");
-            Hydration state = states.get(id);
-            if (state == null) {
-                if (listing && states.size() >= limits.sessions) throw new ListingLimitException("sessions");
+            if (state == null || !Objects.equals(currentId, id)) {
+                if (state != null) {
+                    listingBytes = admit(state, sessions, listingBytes, listing);
+                    completed.add(currentId);
+                }
+                if (completed.contains(id)) throw new SQLException("JDBC session rows must be contiguous by session ID");
+                if (listing && completed.size() >= limits.sessions) throw new ListingLimitException("sessions");
                 MapSession delegate = new MapSession(id);
                 delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
                 delegate.setCreationTime(rs.getLong("CREATION_TIME"));
                 delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
                 state = new Hydration(new JdbcSession(delegate));
-                states.put(id, state);
+                currentId = id;
             }
-            if (state.session == null) {
-                if (!listing) return Collections.emptyList();
-                continue;
-            }
+            if (state.session == null) continue;
             String name = rs.getString("ATTRIBUTE_NAME");
             if (name == null) continue;
             if (++state.count > limits.attributes) {
-                listingBytes -= state.bytes;
                 state.reject(id, "ATTRIBUTE_COUNT");
-                if (!listing) return Collections.emptyList();
-                continue;
+            } else {
+                try {
+                    DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes);
+                    state.bytes += attribute.bytes();
+                    state.session.delegate.setAttribute(name, attribute.value());
+                } catch (AttributeReadException e) {
+                    state.bytes += e.bytesRead;
+                    state.reject(id, e.reason.name());
+                } catch (SerializationFailedException e) {
+                    state.reject(id, "STREAM_FAILURE");
+                }
             }
-            try {
-                // Intrinsic validity is independent of listing order and remaining listing space.
-                DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes,
-                        AttributeReadException.Reason.SESSION_BYTES);
-                if (listing && listingBytes + attribute.bytes() > limits.listingBytes)
-                    throw new ListingLimitException("bytes");
-                listingBytes += attribute.bytes();
-                state.bytes += attribute.bytes();
-                state.session.delegate.setAttribute(name, attribute.value());
-            } catch (AttributeReadException e) {
-                listingBytes -= state.bytes;
-                state.bytes += e.bytesRead;
-                state.reject(id, e.reason.name());
-                if (!listing) return Collections.emptyList();
-            } catch (SerializationFailedException e) {
-                listingBytes -= state.bytes;
-                state.reject(id, "STREAM_FAILURE");
-                if (!listing) return Collections.emptyList();
-            }
+            if (!listing && state.session == null) return Collections.emptyList();
         }
-        List<JdbcSession> sessions = new ArrayList<>();
-        for (Hydration state : states.values()) if (state.session != null) sessions.add(state.session);
+        if (state != null) admit(state, sessions, listingBytes, listing);
         return sessions;
+    }
+
+    private long admit(Hydration state, List<JdbcSession> sessions, long bytes, boolean listing) {
+        if (state.session == null) return bytes;
+        long total = bytes + state.bytes;
+        if (listing && total > limits.listingBytes) throw new ListingLimitException("bytes");
+        sessions.add(state.session);
+        return total;
     }
 
 
