@@ -75,10 +75,17 @@ class JdbcSessionPostgresBudgetTest {
         withSchema("BYTEA", fixture -> {
             List<String> queries = new ArrayList<>();
             var repo = new JdbcSessionRepository(traceQueries(fixture.source(), queries));
-            repo.setDefaultMaxInactiveInterval(60_000);
             var first = repo.createSession(); first.setAttribute("a", "one"); first.setAttribute("c", "three");
             var second = repo.createSession(); second.setAttribute("b", "two"); second.setAttribute("d", "four");
             var empty = repo.createSession(); var bad = repo.createSession();
+            first.setLastAccessedTime(System.currentTimeMillis() - 5_000);
+            empty.setMaxInactiveInterval(-1); repo.save(empty); empty.setLastAccessedTime(1);
+            try (PreparedStatement expiry = fixture.admin().prepareStatement("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = ?")) {
+                expiry.setString(1, first.getId());
+                try (ResultSet row = expiry.executeQuery()) { assertTrue(row.next()); assertEquals(first.getLastAccessedTime() + 1_800_000L, row.getLong(1)); }
+                expiry.setString(1, empty.getId());
+                try (ResultSet row = expiry.executeQuery()) { assertTrue(row.next()); assertEquals(Long.MAX_VALUE, row.getLong(1)); }
+            }
             try (PreparedStatement insert = fixture.admin().prepareStatement("INSERT INTO light_session_attributes VALUES (?, ?, ?)")) {
                 insert.setString(1, bad.getId()); insert.setString(2, "safe_bad");
                 insert.setBytes(3, new ValueBytesConverter().serializer("x".repeat(100))); insert.executeUpdate();
@@ -136,7 +143,6 @@ class JdbcSessionPostgresBudgetTest {
             byte[] good = converter.serializer("ok");
             limit("maxAttributes", 64); limit("maxSessionBytes", prefix.length + 3); limit("maxListingBytes", good.length);
             var repo = new JdbcSessionRepository(fixture.source());
-            repo.setDefaultMaxInactiveInterval(60_000);
             try (PreparedStatement insert = fixture.admin().prepareStatement("INSERT INTO light_session_attributes VALUES (?, ?, ?)")) {
                 for (int i = 0; i < 8; i++) {
                     String id = repo.createSession().getId();
