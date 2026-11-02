@@ -135,11 +135,11 @@ public class JdbcSessionRepository implements
     private DataSource dataSource;
 
     public JdbcSessionRepository(DataSource dataSource) {
-        this(dataSource, null);
+        this(dataSource, JdbcSessionDialect.configured());
     }
 
     /** Override metadata detection for database proxies, compatible servers, or explicit BLOB storage. */
-    public JdbcSessionRepository(DataSource dataSource, JdbcSessionDialect dialect) {
+    JdbcSessionRepository(DataSource dataSource, JdbcSessionDialect dialect) {
         this.dataSource = dataSource;
         this.dialect = dialect;
         prepareQueries();
@@ -358,7 +358,7 @@ public class JdbcSessionRepository implements
             // Concurrent first use may detect the same immutable capabilities more than once.
             result = JdbcSessionDialect.detect(connection.getMetaData());
             if (result == JdbcSessionDialect.BLOB)
-                logger.warn("Unrecognized JDBC database; using BLOB locators for session budgets. Select an explicit JdbcSessionDialect to override detection");
+                logger.warn("Unrecognized JDBC database; using BLOB locators for session budgets. Set light.session.jdbc.databaseDialect to override detection");
             dialect = result;
         }
         return result;
@@ -492,68 +492,139 @@ public class JdbcSessionRepository implements
         JdbcSession session;
         int count;
         int bytes;
+        final List<StagedAttribute> staged = new ArrayList<>();
         Hydration(JdbcSession session) { this.session = session; }
         void reject(String id, String reason) {
             session = null;
+            staged.clear();
             // Do not log bearer session IDs or arbitrary attribute names/contents.
             logger.warn("Ignoring JDBC session [idHash={}] reason={} attributes={} serializedBytes={}",
                     Integer.toHexString(id.hashCode()), reason, count, bytes);
         }
     }
 
-    /** Group arbitrary row order by session ID; only complete valid sessions consume the result budget. */
+    private record StagedAttribute(String name, JdbcSessionStaging.Reference reference) { }
+
+    /** Group arbitrary row order; only complete valid sessions consume the listing result budget. */
     public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
         return extractData(rs, true);
     }
 
     List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
+        if (!listing) return extractSingleSession(rs);
         Map<String, Hydration> states = new LinkedHashMap<>();
-        long stagedBytes = 0;
-        // Bound incomplete/interleaved sessions separately from the final result budget.
-        long stagingLimit = (long) limits.listingBytes + limits.sessionBytes;
-        int rows = 0;
-        while (rs.next()) {
-            if (listing && ++rows > limits.rows) throw new ListingLimitException("rows");
-            String id = rs.getString("SESSION_ID");
-            Hydration state = states.get(id);
-            if (state == null) {
-                if (listing && states.size() >= limits.sessions) throw new ListingLimitException("sessions");
-                MapSession delegate = new MapSession(id);
-                delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
-                delegate.setCreationTime(rs.getLong("CREATION_TIME"));
-                delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
-                state = new Hydration(new JdbcSession(delegate));
-                states.put(id, state);
-            }
-            if (state.session == null) continue;
-            String name = rs.getString("ATTRIBUTE_NAME");
-            if (name == null) continue;
-            if (++state.count > limits.attributes) {
-                stagedBytes -= state.bytes;
-                state.reject(id, "ATTRIBUTE_COUNT");
-            } else {
+        try (JdbcSessionStaging staging = new JdbcSessionStaging()) {
+            int rows = 0;
+            while (rs.next()) {
+                if (++rows > limits.rows) throw new ListingLimitException("rows");
+                String id = rs.getString("SESSION_ID");
+                Hydration state = states.get(id);
+                if (state == null) {
+                    if (states.size() >= limits.sessions) throw new ListingLimitException("sessions");
+                    state = hydration(rs, id);
+                    states.put(id, state);
+                }
+                if (state.session == null) continue;
+                String name = rs.getString("ATTRIBUTE_NAME");
+                if (name == null) continue;
+                if (++state.count > limits.attributes) {
+                    state.reject(id, "ATTRIBUTE_COUNT");
+                    continue;
+                }
                 try {
-                    DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes);
-                    if (listing && stagedBytes + attribute.bytes() > stagingLimit)
-                        throw new ListingLimitException("staging bytes (maxListingBytes + maxSessionBytes)");
-                    stagedBytes += attribute.bytes();
-                    state.bytes += attribute.bytes();
-                    state.session.delegate.setAttribute(name, attribute.value());
+                    byte[] bytes = readAttributeBytes(rs, limits.sessionBytes - state.bytes);
+                    state.bytes += bytes.length;
+                    state.staged.add(new StagedAttribute(name, staging.append(bytes)));
                 } catch (AttributeReadException e) {
-                    stagedBytes -= state.bytes;
                     state.bytes += e.bytesRead;
                     state.reject(id, e.reason.name());
                 } catch (SerializationFailedException e) {
-                    stagedBytes -= state.bytes;
                     state.reject(id, "STREAM_FAILURE");
                 }
             }
-            if (!listing && state.session == null) return Collections.emptyList();
+            List<JdbcSession> sessions = new ArrayList<>();
+            long listingBytes = 0;
+            for (Map.Entry<String, Hydration> entry : states.entrySet()) {
+                Hydration state = entry.getValue();
+                if (state.session == null) continue;
+                try {
+                    for (StagedAttribute attribute : state.staged) {
+                        Object value = converter.deserialize(staging.read(attribute.reference()));
+                        state.session.delegate.setAttribute(attribute.name(), value);
+                    }
+                } catch (SerializationFailedException e) {
+                    state.reject(entry.getKey(), e instanceof AttributeReadException failure ? failure.reason.name() : "DESERIALIZATION_FAILURE");
+                    continue;
+                }
+                listingBytes += state.bytes;
+                if (listingBytes > limits.listingBytes) throw new ListingLimitException("bytes");
+                sessions.add(state.session);
+                state.staged.clear();
+            }
+            return sessions;
+        } catch (IOException | java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("Unable to stage JDBC session listing", e);
         }
-        if (listing && stagedBytes > limits.listingBytes) throw new ListingLimitException("bytes");
-        List<JdbcSession> sessions = new ArrayList<>();
-        for (Hydration state : states.values()) if (state.session != null) sessions.add(state.session);
-        return sessions;
+    }
+
+    private Hydration hydration(ResultSet rs, String id) throws SQLException {
+        MapSession delegate = new MapSession(id);
+        delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
+        delegate.setCreationTime(rs.getLong("CREATION_TIME"));
+        delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
+        return new Hydration(new JdbcSession(delegate));
+    }
+
+    /** Lookup remains a single bounded streaming pass, without disk staging. */
+    private List<JdbcSession> extractSingleSession(ResultSet rs) throws SQLException {
+        Hydration state = null;
+        while (rs.next()) {
+            String id = rs.getString("SESSION_ID");
+            if (state == null) state = hydration(rs, id);
+            String name = rs.getString("ATTRIBUTE_NAME");
+            if (name == null) continue;
+            if (++state.count > limits.attributes) {
+                state.reject(id, "ATTRIBUTE_COUNT");
+                return Collections.emptyList();
+            }
+            try {
+                DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes);
+                state.bytes += attribute.bytes();
+                state.session.delegate.setAttribute(name, attribute.value());
+            } catch (SerializationFailedException e) {
+                if (e instanceof AttributeReadException failure) state.bytes += failure.bytesRead;
+                state.reject(id, e instanceof AttributeReadException failure ? failure.reason.name() : "STREAM_FAILURE");
+                return Collections.emptyList();
+            }
+        }
+        return state == null ? Collections.emptyList() : Collections.singletonList(state.session);
+    }
+
+    /** Raw bytes are bounded before staging; object hooks run once, after session rows are complete. */
+    private byte[] readAttributeBytes(ResultSet rs, int remaining) throws SQLException, SerializationFailedException {
+        InputStream stream = rs.getBinaryStream("ATTRIBUTE_BYTES");
+        SerializationFailedException failure = null;
+        try {
+            if (stream == null) throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, 0, null);
+            int budget = Math.min(limits.attributeBytes, remaining);
+            byte[] bytes = stream.readNBytes(budget + 1);
+            if (bytes.length > budget) throw new AttributeReadException(limits.attributeBytes <= remaining
+                    ? AttributeReadException.Reason.ATTRIBUTE_BYTES : AttributeReadException.Reason.SESSION_BYTES, bytes.length, null);
+            return bytes;
+        } catch (IOException e) {
+            failure = new SerializationFailedException("Failed to read JDBC attribute", e);
+            throw failure;
+        } catch (SerializationFailedException e) {
+            failure = e;
+            throw e;
+        } finally {
+            if (stream != null) {
+                try { stream.close(); } catch (IOException e) {
+                    if (failure != null) failure.addSuppressed(e);
+                    else logger.warn("JDBC attribute stream cleanup failed: {}", e.getClass().getSimpleName());
+                }
+            }
+        }
     }
 
 

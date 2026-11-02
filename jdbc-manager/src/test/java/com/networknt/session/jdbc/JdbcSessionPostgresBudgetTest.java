@@ -129,6 +129,33 @@ class JdbcSessionPostgresBudgetTest {
         });
     }
 
+    @Test void lateCorruptionAfterInterleavedPrefixesDoesNotConsumeTheValidListingBudget() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var converter = new ValueBytesConverter();
+            byte[] prefix = converter.serializer("x".repeat(1024));
+            byte[] good = converter.serializer("ok");
+            limit("maxAttributes", 64); limit("maxSessionBytes", prefix.length + 3); limit("maxListingBytes", good.length);
+            var repo = new JdbcSessionRepository(fixture.source());
+            repo.setDefaultMaxInactiveInterval(60_000);
+            try (PreparedStatement insert = fixture.admin().prepareStatement("INSERT INTO light_session_attributes VALUES (?, ?, ?)")) {
+                for (int i = 0; i < 8; i++) {
+                    String id = repo.createSession().getId();
+                    insert.setString(1, id); insert.setString(2, "a-" + i); insert.setBytes(3, prefix); insert.executeUpdate();
+                    insert.setString(2, "z-" + i); insert.setBytes(3, new byte[]{1, 2, 3}); insert.executeUpdate();
+                }
+            }
+            var healthy = repo.createSession(); healthy.setAttribute("middle", "ok");
+            assertEquals(Set.of(healthy.getId()), repo.getSessions().keySet());
+            // The deliberately interleaved custom query forces every prefix ahead of every rejection.
+            try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery(
+                    "SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, A.ATTRIBUTE_NAME, A.ATTRIBUTE_BYTES " +
+                    "FROM light_session S JOIN light_session_attributes A ON S.SESSION_ID = A.SESSION_ID ORDER BY A.ATTRIBUTE_NAME")) {
+                var loaded = repo.extractData(rows);
+                assertEquals(List.of(healthy.getId()), loaded.stream().map(v -> v.getId()).toList());
+            }
+        });
+    }
+
     private record Fixture(Connection admin, DataSource source) { }
     @FunctionalInterface private interface DatabaseTest { void run(Fixture fixture) throws Exception; }
 
