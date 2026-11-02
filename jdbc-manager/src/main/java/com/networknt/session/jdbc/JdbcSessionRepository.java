@@ -80,10 +80,10 @@ public class JdbcSessionRepository implements
                     "WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
-            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = " +
-                    "CASE WHEN MAX_INACTIVE_INTERVAL < 0 THEN ? ELSE ? + CAST(MAX_INACTIVE_INTERVAL AS DECIMAL(19, 0)) * 1000 END " +
-                    "WHERE SESSION_ID = ?";
+            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = ? WHERE SESSION_ID = ?";
 
+    private static final String GET_SESSION_TIMEOUT_QUERY =
+            "SELECT MAX_INACTIVE_INTERVAL FROM light_session WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
             "UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
@@ -206,7 +206,7 @@ public class JdbcSessionRepository implements
                 stmt.setString(1, id);
                 // Recheck expiry at hydration time; listing is a best-effort view.
                 stmt.setLong(2, System.currentTimeMillis());
-                Hydration state = readSession(stmt, budget);
+                Hydration state = readSessionHydration(stmt, budget);
                 if (state != null) {
                     budget.admit(state.bytes);
                     sessions.put(id, state.session);
@@ -216,15 +216,15 @@ public class JdbcSessionRepository implements
         }, "listing session statement");
     }
 
-    private Hydration readSession(PreparedStatement stmt, ListingReadBudget budget) throws SQLException {
+    private Hydration readSessionHydration(PreparedStatement stmt, ListingReadBudget budget) throws SQLException {
         return readResource(stmt.executeQuery(), rows -> extractSingleSession(rows, budget), "session cursor");
     }
 
-    private JdbcSession readSession(Connection connection, String id) throws SQLException {
+    private JdbcSession readLookupSession(Connection connection, String id) throws SQLException {
         return readResource(connection.prepareStatement(getSessionQuery), stmt -> {
             stmt.setString(1, id);
             stmt.setMaxRows(limits.attributes + 1);
-            Hydration state = readSession(stmt, null);
+            Hydration state = readSessionHydration(stmt, null);
             return state == null ? null : state.session;
         }, "lookup statement");
     }
@@ -233,6 +233,7 @@ public class JdbcSessionRepository implements
         private int rows;
         private long bytes;
         void row() { if (++rows > limits.rows) throw new ListingLimitException("rows"); }
+        void release(int size) { bytes -= size; }
         void admit(int size) {
             bytes += size;
             if (bytes > limits.listingBytes) throw new ListingLimitException("bytes");
@@ -449,7 +450,7 @@ public class JdbcSessionRepository implements
     public JdbcSession findById(final String id) {
         JdbcSession session = null;
         try {
-            session = readResource(dataSource.getConnection(), connection -> readSession(connection, id), "lookup connection");
+            session = readResource(dataSource.getConnection(), connection -> readLookupSession(connection, id), "lookup connection");
         } catch (SQLException e) {
             logger.error("SqlException:", e);
         }
@@ -493,26 +494,39 @@ public class JdbcSessionRepository implements
         }
     }
 
+    /** Compatibility entry point; loaded sessions supply their timeout without this lookup. */
     public void updateSessionLastAccessTime(final String id) {
-        updateSessionLastAccessTime(id, System.currentTimeMillis());
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement stmt = connection.prepareStatement(GET_SESSION_TIMEOUT_QUERY)) {
+            stmt.setString(1, id);
+            Integer timeout;
+            try (ResultSet rows = stmt.executeQuery()) {
+                timeout = rows.next() ? rows.getInt(1) : null;
+            }
+            if (timeout != null) {
+                long now = System.currentTimeMillis();
+                writeSessionAccess(connection, id, now, expiryTime(now, timeout));
+            }
+        } catch (SQLException e) { logger.error("SqlException:", e); }
     }
 
-    private void updateSessionLastAccessTime(String id, long lastAccessedTime) {
-        try (final Connection connection = dataSource.getConnection()) {
-            try (PreparedStatement psAtt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
-                psAtt.setLong(1, lastAccessedTime);
-                psAtt.setLong(2, Long.MAX_VALUE);
-                psAtt.setLong(3, lastAccessedTime);
-                psAtt.setString(4, id);
-                psAtt.executeUpdate();
-            }
-        } catch (SQLException e) {
-            logger.error("SqlException:", e);
-        }
+    private void updateSessionAccess(JdbcSession session) {
+        try (Connection connection = dataSource.getConnection()) {
+            writeSessionAccess(connection, session.getId(), session.getLastAccessedTime(), session.getExpiryTime());
+        } catch (SQLException e) { logger.error("SqlException:", e); }
+    }
 
-        if (logger.isDebugEnabled()) {
-            logger.debug("session access change " + id + " to current time");
+    private void writeSessionAccess(Connection connection, String id, long lastAccessedTime, long expiryTime) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
+            stmt.setLong(1, lastAccessedTime);
+            stmt.setLong(2, expiryTime);
+            stmt.setString(3, id);
+            stmt.executeUpdate();
         }
+    }
+
+    private static long expiryTime(long lastAccessedTime, int timeout) {
+        return timeout < 0 ? Long.MAX_VALUE : lastAccessedTime + timeout * 1000L;
     }
 
     private String getQuery(String base) {
@@ -566,10 +580,10 @@ public class JdbcSessionRepository implements
     }
 
     /**
-     * Maps caller-owned rows in arbitrary session order with row/session-count caps
-     * and a byte cap on the completed valid result. Incomplete sessions remain live
-     * until EOF, bounded by maxListingSessions and maxSessionBytes; prefer getSessions()
-     * to retain only the accepted result plus one candidate.
+     * Maps caller-owned rows with row/session-count caps and a hard byte cap on
+     * retained candidates, including incomplete sessions. A later rejection cannot
+     * rescue an extraction that already exceeded this retention cap. Prefer
+     * getSessions() for complete-session validation before result-byte admission.
      * @deprecated Use {@link #getSessions()} for aggregate listing limits, or {@link #findById(String)}.
      */
     @Deprecated
@@ -585,12 +599,16 @@ public class JdbcSessionRepository implements
                 state = hydration(rs, id);
                 states.put(id, state);
             }
-            if (state.session != null) hydrateAttribute(rs, state, id);
+            if (state.session != null) {
+                int retained = state.bytes;
+                hydrateAttribute(rs, state, id);
+                if (state.session == null) budget.release(retained);
+                else budget.admit(state.bytes - retained);
+            }
         }
         List<JdbcSession> sessions = new ArrayList<>();
         for (Hydration state : states.values()) {
             if (state.session == null) continue;
-            budget.admit(state.bytes);
             sessions.add(state.session);
         }
         return sessions;
@@ -680,7 +698,7 @@ public class JdbcSessionRepository implements
 
 
         public long getExpiryTime() {
-            return getMaxInactiveInterval() < 0 ? Long.MAX_VALUE : getLastAccessedTime() + getMaxInactiveInterval() * 1000L;
+            return expiryTime(getLastAccessedTime(), getMaxInactiveInterval());
         }
 
         @Override
@@ -732,7 +750,7 @@ public class JdbcSessionRepository implements
         public void setLastAccessedTime(long lastAccessedTime) {
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
-            JdbcSessionRepository.this.updateSessionLastAccessTime(this.getId(), lastAccessedTime);
+            JdbcSessionRepository.this.updateSessionAccess(this);
         }
 
         @Override

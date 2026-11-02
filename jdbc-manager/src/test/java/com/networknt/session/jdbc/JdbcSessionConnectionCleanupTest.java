@@ -11,6 +11,21 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Scripted JDBC failures: tests repository ordering/cleanup, not vendor implementations. */
 @org.junit.jupiter.api.parallel.Isolated
 class JdbcSessionConnectionCleanupTest {
+    @Test void loadedAccessBindsComputedExpiryUsingOnlyOnePlainUpdateForEveryDialect() {
+        for (String product : List.of("Oracle", "Microsoft SQL Server", "DB2/LINUXPPC64LE", "PostgreSQL", "H2", "unknown")) {
+            Stub jdbc = new Stub(); jdbc.product = product;
+            var repo = jdbc.repository();
+            var session = repo.new JdbcSession(new MapSession("loaded"));
+            session.setMaxInactiveInterval(60);
+            session.setLastAccessedTime(10_000L);
+            assertEquals(List.of("UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = ? WHERE SESSION_ID = ?"), jdbc.queries);
+            assertEquals(Map.of(1, 10_000L, 2, 70_000L, 3, "loaded"), jdbc.accessParameters);
+            assertEquals(0, jdbc.metadataGets, "Access must not perform vendor detection or timeout queries");
+            session.setMaxInactiveInterval(-1); session.setLastAccessedTime(20_000L);
+            assertEquals(Long.MAX_VALUE, jdbc.accessParameters.get(2));
+        }
+    }
+
     @Test void rollbackFailureAbortsWithoutPotentiallyCommittingByRestoringSettings() {
         Stub jdbc = new Stub(); jdbc.writeFailure = true; jdbc.rollbackFailure = true;
         var repo = jdbc.repository(); var session = repo.new JdbcSession();
@@ -209,10 +224,16 @@ class JdbcSessionConnectionCleanupTest {
             });
         }
 
+        final Map<Integer, Object> accessParameters = new HashMap<>();
+
         PreparedStatement statement(String query) {
             queries.add(query);
             return proxy(PreparedStatement.class, (method, args) -> switch (method) {
-                case "setString", "setInt", "setLong", "close" -> null;
+                case "setString", "setInt", "setLong" -> {
+                    if (query.startsWith("UPDATE light_session SET LAST_ACCESS_TIME")) accessParameters.put((Integer) args[0], args[1]);
+                    yield null;
+                }
+                case "close" -> null;
                 case "setBlob" -> { blobBinds++; yield null; }
                 case "setBinaryStream" -> { streamBinds++; yield null; }
                 case "executeUpdate" -> {

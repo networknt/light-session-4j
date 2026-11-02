@@ -126,6 +126,69 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(rowFailure.getMessage().endsWith("rows")); assertEquals(3, calls.get());
     }
 
+    @Test void deprecatedMapperStopsAtRetainedByteCeilingBeforeLateRejections() throws Exception {
+        byte[] value = new ValueBytesConverter().serializer("value");
+        limit("maxListingBytes", 2 * value.length);
+        ResultSet rows = listingRows(List.of("one", "two", "three", "one", "two", "three"),
+                List.of(value, value, value, new byte[]{1}, new byte[]{1}, new byte[]{1}));
+        var consumed = new java.util.concurrent.atomic.AtomicInteger();
+        ResultSet counted = (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                (p, m, a) -> {
+                    if (m.getName().equals("next")) consumed.incrementAndGet();
+                    return invoke(rows, m, a);
+                });
+        var failure = assertThrows(IllegalStateException.class, () -> repository().extractData(counted));
+        assertTrue(failure.getMessage().endsWith("bytes"));
+        assertEquals(3, consumed.get(), "Must stop on the first excessive candidate, before EOF or its later rejection");
+    }
+
+    @Test void deprecatedMapperReleasesRejectedCandidatesWithinTheRetentionCeiling() throws Exception {
+        byte[] value = new ValueBytesConverter().serializer("value");
+        limit("maxListingBytes", 2 * value.length);
+        var sessions = repository().extractData(listingRows(List.of("bad", "one", "bad", "two"),
+                List.of(value, value, new byte[]{1}, value)));
+        assertEquals(List.of("one", "two"), sessions.stream().map(v -> v.getId()).toList());
+    }
+
+    @Test void compatibilityAccessEntryPointUsesStoredTimeoutWithoutHydratingAttributes() throws Exception {
+        var repo = repository(); repo.setDefaultMaxInactiveInterval(-1);
+        var session = repo.createSession();
+        session.setLastAccessedTime(1);
+        attribute(session.getId(), "corrupt", "value");
+        try (Connection connection = database.getConnection(); Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("UPDATE light_session_attributes SET ATTRIBUTE_BYTES = X'010203'");
+        }
+        repo.updateSessionLastAccessTime(session.getId());
+        assertEquals(Long.MAX_VALUE, storedExpiry(session.getId()));
+        repo.updateSessionLastAccessTime("missing");
+    }
+
+    @Test void documentedMigrationRepairsUntouchedLegacyRowsAndIsIdempotent() throws Exception {
+        var repo = repository();
+        int[] timeouts = {1800, 1, -1, Integer.MAX_VALUE, 0};
+        var sessions = new ArrayList<JdbcSessionRepository.JdbcSession>();
+        long oldAccess = System.currentTimeMillis() - 5_000;
+        for (int timeout : timeouts) {
+            var session = repo.createSession(); session.setMaxInactiveInterval(timeout);
+            session.setLastAccessedTime(oldAccess); repo.save(session); sessions.add(session);
+        }
+        try (Connection connection = database.getConnection(); Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL");
+            assertFalse(repo.getSessions().containsKey(sessions.getFirst().getId()));
+            String migration;
+            try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
+                assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            assertEquals(5, stmt.executeUpdate(migration));
+            assertEquals(5, stmt.executeUpdate(migration));
+        }
+        for (var session : sessions) assertEquals(session.getExpiryTime(), storedExpiry(session.getId()));
+        repo.cleanUpExpiredSessions();
+        assertEquals(Set.of(sessions.get(0).getId(), sessions.get(2).getId(), sessions.get(3).getId()), repo.getSessions().keySet());
+        assertNotNull(repo.findById(sessions.getFirst().getId()));
+        assertNull(repo.findById(sessions.get(1).getId()));
+    }
+
     @Test void writeCountRejectsBeforeSqlAndRetainsPendingChange() {
         limit("maxAttributes", 2);
         var repo = repository(); var session = repo.createSession();
@@ -498,7 +561,7 @@ class JdbcSessionAggregateLimitTest {
         for (String reason : List.of("count", "bytes", "corrupt", "filter")) {
             limit("maxAttributes", reason.equals("count") ? 1 : 64);
             limit("maxSessionBytes", reason.equals("bytes") ? prefix.length : 4096);
-            limit("maxListingBytes", good.length);
+            limit("maxListingBytes", 2 * (prefix.length + good.length));
             byte[] last = switch (reason) {
                 case "corrupt" -> new byte[]{1, 2, 3};
                 case "filter" -> converter.serializer(new CountingValue());
@@ -522,7 +585,7 @@ class JdbcSessionAggregateLimitTest {
         var sessions = repository().extractData(listingRows(List.of("one", "two", "one"), List.of(value, value, value)));
         assertEquals(List.of("one", "two"), sessions.stream().map(s -> s.getId()).toList());
         assertEquals(2, sessions.getFirst().getAttributeNames().size());
-        limit("maxListingBytes", value.length);
+        limit("maxListingBytes", 2 * value.length);
         sessions = repository().extractData(listingRows(List.of("one", "two", "one"), List.of(value, value, new byte[]{1, 2, 3})));
         assertEquals(List.of("two"), sessions.stream().map(s -> s.getId()).toList());
     }
@@ -533,7 +596,7 @@ class JdbcSessionAggregateLimitTest {
         byte[] good = converter.serializer("ok");
         byte[] filtered = converter.serializer(new CountingValue());
         int sessionBudget = prefix.length + Math.max(filtered.length, good.length);
-        limit("maxSessionBytes", sessionBudget); limit("maxListingBytes", good.length);
+        limit("maxSessionBytes", sessionBudget); limit("maxListingBytes", 8 * sessionBudget + good.length);
         for (String reason : List.of("count", "bytes", "corrupt", "filter")) {
             limit("maxAttributes", reason.equals("count") ? 1 : 64);
             byte[] last = switch (reason) {
