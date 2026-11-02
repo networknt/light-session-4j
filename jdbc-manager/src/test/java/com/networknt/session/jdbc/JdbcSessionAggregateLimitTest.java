@@ -26,7 +26,7 @@ class JdbcSessionAggregateLimitTest {
         try (Connection c = database.getConnection(); Statement stmt = c.createStatement()) { stmt.execute("SHUTDOWN"); }
     }
     private void limit(String key, int value) {
-        key = JdbcSessionLimits.PREFIX + key;
+        key = com.networknt.session.jdbc.serializer.SerializedAttributeLimits.PREFIX + key;
         if (!original.containsKey(key)) original.put(key, System.getProperty(key));
         System.setProperty(key, Integer.toString(value));
     }
@@ -209,8 +209,8 @@ class JdbcSessionAggregateLimitTest {
     private boolean attemptWrite(java.util.concurrent.CountDownLatch start, JdbcSessionRepository.JdbcSession session, String name) throws Exception {
         start.await();
         try { session.setAttribute(name, "value"); return true; }
-        catch (IllegalStateException e) {
-            assertTrue(e.getMessage().startsWith("Stored JDBC session exceeds"), e.toString());
+        catch (SessionBudgetExceededException e) {
+            assertTrue(e.getMeasured() > e.getLimit());
             return false;
         }
     }
@@ -245,6 +245,152 @@ class JdbcSessionAggregateLimitTest {
             assertEquals(bytes.length, rejected.bytesRead);
             assertEquals("value", converter.deserializeStream(new java.io.ByteArrayInputStream(bytes), bytes.length, reason).value());
         }
+    }
+
+    @Test void connectionStateIsRestoredAfterCommitBudgetRejectionAndSqlFailure() throws Exception {
+        limit("maxAttributes", 1);
+        for (boolean initialAutoCommit : new boolean[]{true, false}) {
+            var closed = new java.util.concurrent.atomic.AtomicInteger();
+            javax.sql.DataSource tracked = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (proxy, method, args) -> {
+                        if (!method.getName().equals("getConnection")) return invoke(database, method, args);
+                        Connection c = database.getConnection();
+                        c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+                        c.setAutoCommit(initialAutoCommit);
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (cp, cm, ca) -> {
+                                    if (cm.getName().equals("close")) {
+                                        assertEquals(Connection.TRANSACTION_SERIALIZABLE, c.getTransactionIsolation());
+                                        assertEquals(initialAutoCommit, c.getAutoCommit());
+                                        closed.incrementAndGet();
+                                    }
+                                    return invoke(c, cm, ca);
+                                });
+                    });
+            var repo = new JdbcSessionRepository(tracked);
+            var session = repo.createSession();
+            var stale = repo.findById(session.getId());
+            session.setAttribute("first", "value");
+            var failure = assertThrows(SessionBudgetExceededException.class, () -> stale.setAttribute("second", "value"));
+            assertEquals(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT, failure.getReason());
+            assertTrue(failure.getMessage().contains("pending changes retained"));
+            assertEquals(Set.of("first"), repo.findById(session.getId()).getAttributeNames());
+            try (Connection c = database.getConnection(); Statement stmt = c.createStatement()) {
+                stmt.execute("ALTER TABLE light_session ADD CONSTRAINT reject_interval CHECK(max_inactive_interval < 9000)");
+            }
+            session.setMaxInactiveInterval(9999);
+            assertThrows(IllegalStateException.class, () -> repo.save(session));
+            assertTrue(closed.get() >= 6);
+            try (Connection c = database.getConnection(); Statement stmt = c.createStatement()) {
+                stmt.execute("ALTER TABLE light_session DROP CONSTRAINT reject_interval");
+            }
+        }
+    }
+
+    @Test void storedValidationUsesScalarSqlAndSkipsEmptyCreatesAndUnchangedSaves() throws Exception {
+        var queries = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource tracked = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (proxy, method, args) -> {
+                    if (!method.getName().equals("getConnection")) return invoke(database, method, args);
+                    Connection c = database.getConnection();
+                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                            (cp, cm, ca) -> {
+                                if (cm.getName().equals("prepareStatement") && ca[0].toString().startsWith("SELECT COUNT(*)")) {
+                                    assertTrue(ca[0].toString().contains("SUM(OCTET_LENGTH(ATTRIBUTE_BYTES))"));
+                                    queries.incrementAndGet();
+                                }
+                                return invoke(c, cm, ca);
+                            });
+                });
+        var repo = new JdbcSessionRepository(tracked); var session = repo.createSession();
+        assertEquals(0, queries.get());
+        session.setAttribute("a", "value");
+        assertEquals(1, queries.get());
+        repo.save(session); session.setMaxInactiveInterval(3600); repo.save(session);
+        assertEquals(1, queries.get());
+        session.removeAttribute("a");
+        assertEquals(2, queries.get());
+    }
+
+    @Test void replacementAndRemovalPlusAddUseResultingStoredBudget() throws Exception {
+        limit("maxAttributes", 2);
+        String large = "x".repeat(100);
+        int size = new ValueBytesConverter().serializer(large).length;
+        limit("maxSessionBytes", size * 2);
+        var repo = repository(); var session = repo.createSession();
+        session.setAttribute("a", "small"); session.setAttribute("b", "small");
+        var left = repo.findById(session.getId()); var right = repo.findById(session.getId());
+        left.setAttribute("a", large); right.setAttribute("b", large);
+        assertEquals(large, repo.findById(session.getId()).getAttribute("b"));
+        var stale = repo.findById(session.getId());
+        var rejection = assertThrows(SessionBudgetExceededException.class, () -> stale.setAttribute("a", large + "x"));
+        assertEquals(SessionBudgetExceededException.Reason.SESSION_BYTES, rejection.getReason());
+        assertEquals(large, repo.findById(session.getId()).getAttribute("a"));
+        var countRejection = assertThrows(SessionBudgetExceededException.class, () -> stale.setAttribute("c", large));
+        assertEquals(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT, countRejection.getReason());
+        stale.removeAttribute("a"); // Saves the retained add and removal in the same transaction.
+        assertEquals(Set.of("b", "c"), repo.findById(session.getId()).getAttributeNames());
+    }
+
+    @Test void lookupStopsAtFirstRejectedRowAndAtAttributeCountBoundary() throws Exception {
+        limit("maxAttributes", 2);
+        var nextCalls = new java.util.concurrent.atomic.AtomicInteger();
+        ResultSet rows = syntheticRows(nextCalls, List.of(new byte[]{1, 2, 3}), true);
+        assertTrue(repository().extractData(rows, false).isEmpty());
+        assertEquals(1, nextCalls.get());
+        nextCalls.set(0);
+        byte[] value = new ValueBytesConverter().serializer("valid");
+        rows = syntheticRows(nextCalls, List.of(value), true);
+        assertTrue(repository().extractData(rows, false).isEmpty());
+        assertEquals(3, nextCalls.get());
+    }
+
+    @Test void intrinsicallyRejectedAttributesDoNotBecomeListingFailuresInEitherOrder() throws Exception {
+        var converter = new ValueBytesConverter();
+        byte[] good = converter.serializer("ok");
+        byte[] oversized = converter.serializer("x".repeat(100));
+        byte[] corrupt = new byte[100];
+        byte[] disallowed = converter.serializer(new CountingValue());
+        for (byte[] bad : List.of(oversized, corrupt, disallowed)) {
+            for (boolean badFirst : new boolean[]{true, false}) {
+                int intrinsicLimit = bad == oversized ? 50 : bad.length;
+                limit("maxAttributeBytes", intrinsicLimit); limit("maxSessionBytes", intrinsicLimit); limit("maxListingBytes", good.length);
+                var rows = syntheticRows(new java.util.concurrent.atomic.AtomicInteger(),
+                        badFirst ? List.of(bad, good) : List.of(good, bad), false);
+                assertEquals(1, repository().extractData(rows).size());
+            }
+        }
+        // Equal attribute/session/listing limits favor the intrinsic rejection too.
+        limit("maxAttributeBytes", 50); limit("maxSessionBytes", 50); limit("maxListingBytes", 50);
+        assertTrue(repository().extractData(syntheticRows(new java.util.concurrent.atomic.AtomicInteger(), List.of(oversized), false)).isEmpty());
+    }
+
+    private ResultSet syntheticRows(java.util.concurrent.atomic.AtomicInteger nextCalls, List<byte[]> bytes, boolean sameSession) {
+        return (ResultSet) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "next" -> nextCalls.incrementAndGet() <= (sameSession ? 100_000 : bytes.size());
+                    case "getString" -> args[0].equals("SESSION_ID") ? (sameSession ? "session" : "session-" + nextCalls.get()) : "attribute-" + nextCalls.get();
+                    case "getInt" -> 1800;
+                    case "getLong" -> System.currentTimeMillis();
+                    case "getBinaryStream" -> new java.io.ByteArrayInputStream(bytes.get(sameSession ? 0 : nextCalls.get() - 1));
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static Object invoke(Object target, java.lang.reflect.Method method, Object[] args) throws Throwable {
+        try { return method.invoke(target, args); }
+        catch (java.lang.reflect.InvocationTargetException e) { throw e.getCause(); }
+    }
+
+    @Test void pendingByteBudgetRejectsBeforeConnectionWithTypedReason() {
+        limit("maxSessionBytes", 1);
+        var repo = repository(); var session = repo.createSession();
+        connections.set(0);
+        var rejected = assertThrows(SessionBudgetExceededException.class, () -> session.setAttribute("a", "value"));
+        assertEquals(SessionBudgetExceededException.Reason.SESSION_BYTES, rejected.getReason());
+        assertTrue(rejected.getMeasured() > rejected.getLimit());
+        assertEquals(0, connections.get());
+        assertTrue(session.isChanged());
     }
 
     @Test void invalidBudgetFailsConstruction() {

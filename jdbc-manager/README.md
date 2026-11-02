@@ -86,7 +86,8 @@ stream ownership/cleanup, and null/corrupt/I/O failures. Public H2 repository te
 exercise oversized setAttribute(), failed createSession(), explicit rollback after
 partial SQL work, correction/retry, mixed valid/rejected sessions and read-only
 hydration (including a custom writeObject counter). Existing H2 HTTP-session tests
-also run. No live external database or production session is used.
+also run. The default suite uses H2 only; the opt-in PostgreSQL contract below uses
+a caller-supplied disposable database, never production sessions.
 
 ```sh
 mvn -pl jdbc-manager -am test
@@ -118,15 +119,34 @@ stored attribute count and serialized lengths before commit. An over-budget resu
 back with pending edits retained. Concurrent repository writers therefore cannot
 jointly commit an over-budget session. All writers must follow this parent-row
 locking protocol; direct external attribute writes are outside this guarantee.
-Unchanged objects are neither reserialized nor rewritten. Validation scans stored
-binary streams with a fixed-size buffer and stops at the session budget plus one
-byte; it does not decode them. Saves use READ_COMMITTED so the validation statement
-sees earlier writers after acquiring the parent lock.
+Unchanged objects are neither reserialized nor rewritten. Validation returns one
+scalar count/byte-total row using COUNT and SUM(OCTET_LENGTH) for PostgreSQL/H2;
+Oracle uses SUM(DBMS_LOB.GETLENGTH). No attribute payload is read back through JDBC.
+The database still evaluates the aggregate while holding the parent lock. Empty
+new sessions and saves without attribute changes skip the aggregate query.
+Saves temporarily use READ_COMMITTED so validation sees earlier writers after the
+parent lock. Original isolation/autocommit are restored after commit or rollback.
+Cleanup failures are suppressed on the original save failure, or logged following
+a confirmed commit. If rollback fails, the connection is aborted instead of changing
+transaction settings that might implicitly commit unresolved work.
+Session count/byte write rejections are SessionBudgetExceededException (an
+IllegalStateException) with typed reason, measured size and limit; pending edits
+remain available for correction.
 
 Read hydration rejects the entire over-budget session while retaining healthy
 sessions. Listing budgets apply only to getSessions()/extractData(), independently of the
 per-session budgets; they may deliberately be smaller. findById() uses only
-per-session and per-attribute limits. A listing that exceeds a listing budget throws IllegalStateException;
+per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
+rows and closes its cursor immediately after rejecting the session.
+An attribute is decoded within the attribute/session byte ceiling before charging
+successful hydration to the listing byte budget. Intrinsic byte/filter/corruption
+rejections therefore drop that session even when listing space is smaller or tied.
+Attribute-byte limits take precedence over session-byte limits on an exact tie.
+Previously hydrated bytes are released from listing accounting when their session
+is rejected. Listing validation can hold one additional attribute scratch buffer
+(up to min(maxAttributeBytes, remaining session bytes) + 1), independent of the
+remaining listing budget; decoded heap still has no exact byte bound.
+A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
 is bounded before ObjectInputStream is constructed. Inventory existing sessions
 before upgrading; a previously accepted large session can now be unavailable.
@@ -136,3 +156,21 @@ These are serialized-byte/count budgets, not an exact bound on decoded object
 heap, JVM/provider copies or a JDBC driver's internal buffering. getSessions still
 materializes its now-bounded result; use narrower application queries for larger
 inventories. No production-driver or live deployment qualification is implied.
+
+### Disposable PostgreSQL contract
+
+The opt-in test exercises concurrent inserts, growing existing attributes through
+UPDATE, and batched removal-plus-add deltas against PostgreSQL. It also verifies
+that borrowed connections return to SERIALIZABLE and autocommit after successful
+commits and budget rollbacks. It creates and drops only a uniquely named test schema.
+Supply an explicitly disposable database URL (credentials below are synthetic):
+
+```sh
+mvn -pl jdbc-manager -am -Pjdbc-postgres-tests \
+  '-DjdbcPostgresUrl=jdbc:postgresql://127.0.0.1:PORT/budget?user=budget&password=budget' \
+  -Dtest=JdbcSessionPostgresBudgetTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+The normal suite skips this test and does not open PostgreSQL connections. Local
+PostgreSQL qualification does not establish Oracle driver behavior, production
+pool behavior, or deployment readiness.

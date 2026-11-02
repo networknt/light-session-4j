@@ -111,7 +111,7 @@ public class DefaultDeserializer implements Deserializer<Object> {
     public DecodedAttribute deserializeBounded(InputStream inputStream, int budget,
                                               AttributeReadException.Reason budgetReason) throws IOException, SerializationFailedException {
         int effective = Math.min(maxSerializedBytes, budget);
-        AttributeReadException.Reason reason = maxSerializedBytes < budget
+        AttributeReadException.Reason reason = maxSerializedBytes <= budget
                 ? AttributeReadException.Reason.ATTRIBUTE_BYTES : budgetReason;
         if (inputStream == null) throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, 0, null);
         // One bounded read owns all byte accounting. Hooks only see the resulting buffer.

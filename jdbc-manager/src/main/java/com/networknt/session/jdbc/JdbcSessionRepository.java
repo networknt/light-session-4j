@@ -62,6 +62,13 @@ public class JdbcSessionRepository implements
             "INSERT INTO light_session(SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME) " +
                     "VALUES (?, ?, ?, ?, ?, ?)";
 
+    private static final String SESSION_BUDGET_QUERY =
+            "SELECT COUNT(*) AS ATTRIBUTE_COUNT, COALESCE(SUM(OCTET_LENGTH(ATTRIBUTE_BYTES)), 0) AS SESSION_BYTES " +
+                    "FROM light_session_attributes WHERE SESSION_ID = ?";
+    private static final String ORACLE_SESSION_BUDGET_QUERY =
+            "SELECT COUNT(*) AS ATTRIBUTE_COUNT, COALESCE(SUM(DBMS_LOB.GETLENGTH(ATTRIBUTE_BYTES)), 0) AS SESSION_BYTES " +
+                    "FROM light_session_attributes WHERE SESSION_ID = ?";
+
     private static final String CREATE_SESSION_ATTRIBUTE_QUERY =
             "INSERT INTO light_session_attributes(SESSION_ID, ATTRIBUTE_NAME, ATTRIBUTE_BYTES) " +
                     "VALUES (?, ?, ?)";
@@ -114,6 +121,8 @@ public class JdbcSessionRepository implements
     private static final Logger logger = LoggerFactory.getLogger(JdbcSessionRepository.class);
 
 
+    private String sessionBudgetQuery;
+    private String oracleSessionBudgetQuery;
     private String createSessionQuery;
     private String createSessionAttributeQuery;
     private String getSessionQuery;
@@ -188,7 +197,8 @@ public class JdbcSessionRepository implements
         Map<String, byte[]> attributes = new LinkedHashMap<>();
         try {
             if (session.getAttributeNames().size() > limits.attributes)
-                throw new SerializationFailedException("Session attribute count exceeds configured limit");
+                throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT,
+                        session.getAttributeNames().size(), limits.attributes);
             long pendingBytes = 0;
             Set<String> names = session.isNew() ? session.getAttributeNames() : session.getDelta().keySet();
             for (String name : names) {
@@ -196,7 +206,8 @@ public class JdbcSessionRepository implements
                 byte[] bytes = value == null ? null : converter.serializer(value);
                 if (bytes != null) pendingBytes += bytes.length;
                 if (pendingBytes > limits.sessionBytes)
-                    throw new SerializationFailedException("Serialized session exceeds configured byte limit");
+                    throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.SESSION_BYTES,
+                            pendingBytes, limits.sessionBytes);
                 attributes.put(name, bytes);
             }
         } catch (SerializationFailedException e) {
@@ -205,18 +216,41 @@ public class JdbcSessionRepository implements
 
         boolean committed = false;
         try (Connection connection = dataSource.getConnection()) {
-            // A fresh statement snapshot after the parent lock must see the previous writer.
-            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            connection.setAutoCommit(false);
+            int isolation = connection.getTransactionIsolation();
+            boolean autoCommit = connection.getAutoCommit();
+            Throwable failure = null;
+            boolean transactionStarted = false;
+            boolean transactionEnded = true;
             try {
+                // The statement after acquiring the parent lock must see the previous writer.
+                if (isolation != Connection.TRANSACTION_READ_COMMITTED)
+                    connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                if (autoCommit) connection.setAutoCommit(false);
+                transactionStarted = true;
+                transactionEnded = false;
+                boolean validate = !session.isNew() && !attributes.isEmpty();
                 writeSession(connection, session, attributes);
-                validateStoredBudget(connection, session.getId());
+                if (validate) validateStoredBudget(connection, session.getId());
                 connection.commit();
+                transactionEnded = true;
                 committed = true;
                 session.clearChangeFlags();
             } catch (SQLException | RuntimeException e) {
-                try { connection.rollback(); } catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
+                failure = e;
+                if (transactionStarted) {
+                    try { connection.rollback(); transactionEnded = true; }
+                    catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
+                }
                 throw e;
+            } finally {
+                try {
+                    if (transactionEnded) restoreConnection(connection, isolation, autoCommit);
+                    // Changing isolation/autocommit with an unresolved transaction could commit it.
+                    else connection.abort(Runnable::run);
+                } catch (SQLException cleanupFailure) {
+                    if (failure != null) failure.addSuppressed(cleanupFailure);
+                    else throw cleanupFailure;
+                }
             }
         } catch (SQLException e) {
             if (committed) {
@@ -258,7 +292,7 @@ public class JdbcSessionRepository implements
             } else {
                 int count;
                 try (PreparedStatement stmt = connection.prepareStatement(updateSessionAttributeQuery)) {
-                    stmt.setBlob(1, new ByteArrayInputStream(bytes), bytes.length);
+                    stmt.setBinaryStream(1, new ByteArrayInputStream(bytes), bytes.length);
                     stmt.setString(2, session.getId()); stmt.setString(3, name);
                     count = stmt.executeUpdate();
                 }
@@ -267,33 +301,32 @@ public class JdbcSessionRepository implements
         }
     }
 
-    /** writeSession updates/inserts the parent first, serializing repository writers on its row lock.
-     * Validate the actual result in that same transaction, before releasing the lock at commit.
-     */
+    private static void restoreConnection(Connection connection, int isolation, boolean autoCommit) throws SQLException {
+        SQLException failure = null;
+        try { connection.setTransactionIsolation(isolation); }
+        catch (SQLException e) { failure = e; }
+        try { connection.setAutoCommit(autoCommit); }
+        catch (SQLException e) {
+            if (failure == null) failure = e;
+            else failure.addSuppressed(e);
+        }
+        if (failure != null) throw failure;
+    }
+
+    /** The parent update holds its row lock until this aggregate check and commit finish. */
     private void validateStoredBudget(Connection connection, String id) throws SQLException {
-        try (PreparedStatement stmt = connection.prepareStatement(
-                "SELECT ATTRIBUTE_BYTES FROM light_session_attributes WHERE SESSION_ID = ?")) {
+        String query = "Oracle".equals(connection.getMetaData().getDatabaseProductName())
+                ? oracleSessionBudgetQuery : sessionBudgetQuery;
+        try (PreparedStatement stmt = connection.prepareStatement(query)) {
             stmt.setString(1, id);
             try (ResultSet rows = stmt.executeQuery()) {
-                int count = 0;
-                long bytes = 0;
-                byte[] buffer = new byte[8192];
-                while (rows.next()) {
-                    if (++count > limits.attributes) throw new IllegalStateException("Stored JDBC session exceeds attribute count limit");
-                    // Binary streams work for BYTEA as well as BLOB drivers; never decode unchanged values.
-                    try (InputStream stream = rows.getBinaryStream(1)) {
-                        if (stream != null) {
-                            int n;
-                            while ((n = stream.read(buffer, 0, (int) Math.min(buffer.length, limits.sessionBytes - bytes + 1))) != -1) {
-                                bytes += n;
-                                if (bytes > limits.sessionBytes) break;
-                            }
-                        }
-                    } catch (IOException e) {
-                        throw new SQLException("Failed to measure stored JDBC session bytes", e);
-                    }
-                    if (bytes > limits.sessionBytes) throw new IllegalStateException("Stored JDBC session exceeds byte limit");
-                }
+                if (!rows.next()) throw new SQLException("Missing JDBC session budget result");
+                long count = rows.getLong("ATTRIBUTE_COUNT");
+                long bytes = rows.getLong("SESSION_BYTES");
+                if (count > limits.attributes)
+                    throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.ATTRIBUTE_COUNT, count, limits.attributes);
+                if (bytes > limits.sessionBytes)
+                    throw new SessionBudgetExceededException(SessionBudgetExceededException.Reason.SESSION_BYTES, bytes, limits.sessionBytes);
             }
         }
     }
@@ -301,7 +334,7 @@ public class JdbcSessionRepository implements
     private void insertAttribute(Connection connection, String id, String name, byte[] bytes) throws SQLException {
         try (PreparedStatement stmt = connection.prepareStatement(createSessionAttributeQuery)) {
             stmt.setString(1, id); stmt.setString(2, name);
-            stmt.setBlob(3, new ByteArrayInputStream(bytes), bytes.length);
+            stmt.setBinaryStream(3, new ByteArrayInputStream(bytes), bytes.length);
             stmt.executeUpdate();
         }
     }
@@ -312,12 +345,13 @@ public class JdbcSessionRepository implements
         JdbcSession session = null;
         try (final Connection connection = dataSource.getConnection()) {
 
-            PreparedStatement stmt = connection.prepareStatement(this.getSessionQuery);
-            stmt.setString(1, id);
-            ResultSet rs = stmt.executeQuery();
-            List<JdbcSession> sessions = extractData(rs, false);
-            if (!sessions.isEmpty()) {
-                session = sessions.get(0);
+            try (PreparedStatement stmt = connection.prepareStatement(this.getSessionQuery)) {
+                stmt.setString(1, id);
+                stmt.setMaxRows(limits.attributes + 1);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<JdbcSession> sessions = extractData(rs, false);
+                    if (!sessions.isEmpty()) session = sessions.get(0);
+                }
             }
 
         } catch (SQLException e) {
@@ -385,6 +419,8 @@ public class JdbcSessionRepository implements
     }
 
     private void prepareQueries() {
+        this.sessionBudgetQuery = getQuery(SESSION_BUDGET_QUERY);
+        this.oracleSessionBudgetQuery = getQuery(ORACLE_SESSION_BUDGET_QUERY);
         this.createSessionQuery = getQuery(CREATE_SESSION_QUERY);
         this.createSessionAttributeQuery = getQuery(CREATE_SESSION_ATTRIBUTE_QUERY);
         this.getSessionQuery = getQuery(GET_SESSION_QUERY);
@@ -438,12 +474,14 @@ public class JdbcSessionRepository implements
         return extractData(rs, true);
     }
 
-    private List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
+    List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
         Map<String, Hydration> states = new LinkedHashMap<>();
         long listingBytes = 0;
         int rows = 0;
         while (rs.next()) {
             if (listing && ++rows > limits.rows) throw new ListingLimitException("rows");
+            // A lookup can contain at most maxAttributes valid rows plus one rejection row.
+            if (!listing && ++rows > (long) limits.attributes + 1) return Collections.emptyList();
             String id = rs.getString("SESSION_ID");
             Hydration state = states.get(id);
             if (state == null) {
@@ -455,31 +493,36 @@ public class JdbcSessionRepository implements
                 state = new Hydration(new JdbcSession(delegate));
                 states.put(id, state);
             }
-            if (state.session == null) continue;
+            if (state.session == null) {
+                if (!listing) return Collections.emptyList();
+                continue;
+            }
             String name = rs.getString("ATTRIBUTE_NAME");
             if (name == null) continue;
             if (++state.count > limits.attributes) {
+                listingBytes -= state.bytes;
                 state.reject(id, "ATTRIBUTE_COUNT");
+                if (!listing) return Collections.emptyList();
                 continue;
             }
-            int budget = limits.sessionBytes - state.bytes;
-            AttributeReadException.Reason reason = AttributeReadException.Reason.SESSION_BYTES;
-            if (listing && limits.listingBytes - listingBytes <= budget) {
-                budget = (int) (limits.listingBytes - listingBytes);
-                reason = AttributeReadException.Reason.LISTING_BYTES;
-            }
             try {
-                DecodedAttribute attribute = deserialize(rs, budget, reason);
+                // Intrinsic validity is independent of listing order and remaining listing space.
+                DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes,
+                        AttributeReadException.Reason.SESSION_BYTES);
+                if (listing && listingBytes + attribute.bytes() > limits.listingBytes)
+                    throw new ListingLimitException("bytes");
                 listingBytes += attribute.bytes();
                 state.bytes += attribute.bytes();
                 state.session.delegate.setAttribute(name, attribute.value());
             } catch (AttributeReadException e) {
-                if (e.reason == AttributeReadException.Reason.LISTING_BYTES) throw new ListingLimitException("bytes");
-                listingBytes += e.bytesRead;
+                listingBytes -= state.bytes;
                 state.bytes += e.bytesRead;
                 state.reject(id, e.reason.name());
+                if (!listing) return Collections.emptyList();
             } catch (SerializationFailedException e) {
+                listingBytes -= state.bytes;
                 state.reject(id, "STREAM_FAILURE");
+                if (!listing) return Collections.emptyList();
             }
         }
         List<JdbcSession> sessions = new ArrayList<>();
