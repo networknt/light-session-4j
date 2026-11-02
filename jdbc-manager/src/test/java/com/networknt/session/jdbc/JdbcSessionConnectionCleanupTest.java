@@ -87,6 +87,25 @@ class JdbcSessionConnectionCleanupTest {
         assertEquals(2, unknown.blobBinds); assertEquals(0, unknown.streamBinds);
     }
 
+    @Test void compatiblePostgresDriverAndExplicitOverrideDoNotUseBlobBinding() {
+        Stub compatible = new Stub(); compatible.product = "Compatible server"; compatible.driver = "PostgreSQL JDBC Driver";
+        var repo = compatible.repository(); repo.save(existing(repo));
+        assertEquals(2, compatible.streamBinds); assertEquals(0, compatible.blobBinds);
+        Stub override = new Stub(); override.product = "Custom proxy";
+        repo = override.repository(JdbcSessionDialect.POSTGRESQL); repo.save(existing(repo));
+        assertEquals(2, override.streamBinds); assertEquals(0, override.metadataGets);
+    }
+
+    @Test void mysqlMariaDbAndDb2UseScalarLengthQueries() {
+        for (String product : List.of("MySQL", "MariaDB", "DB2/LINUXX8664")) {
+            Stub jdbc = new Stub(); jdbc.product = product;
+            var repo = jdbc.repository(); repo.save(existing(repo));
+            String function = product.startsWith("DB2") ? "SUM(LENGTH(ATTRIBUTE_BYTES))" : "SUM(OCTET_LENGTH(ATTRIBUTE_BYTES))";
+            assertTrue(jdbc.queries.stream().anyMatch(q -> q.contains(function)));
+            assertEquals(0, jdbc.blobLengths);
+        }
+    }
+
     private static JdbcSessionRepository.JdbcSession existing(JdbcSessionRepository repo) {
         var session = repo.new JdbcSession(new MapSession("synthetic"));
         session.getDelta().put("a", "value");
@@ -97,7 +116,7 @@ class JdbcSessionConnectionCleanupTest {
         int isolation = Connection.TRANSACTION_READ_COMMITTED;
         boolean autoCommit = true, closed;
         boolean writeFailure, rollbackFailure, abortFailure, restoreIsolationFailure, restoreAutoFailure;
-        String product = "H2";
+        String product = "H2", driver = "Generic JDBC";
         int aborts, commits, rollbacks, metadataGets, isolationGets, blobBinds, streamBinds, blobLengths, blobFrees;
         final List<String> queries = new ArrayList<>();
         final List<Integer> isolationSets = new ArrayList<>();
@@ -106,12 +125,14 @@ class JdbcSessionConnectionCleanupTest {
                 abortError = new SQLException("abort"), restoreIsolationError = new SQLException("restore isolation"),
                 restoreAutoError = new SQLException("restore autocommit");
 
-        JdbcSessionRepository repository() {
+        JdbcSessionRepository repository() { return repository(null); }
+
+        JdbcSessionRepository repository(JdbcSessionDialect override) {
             DataSource ds = proxy(DataSource.class, (method, args) -> {
                 if (method.equals("getConnection")) return connection();
                 throw new AssertionError(method);
             });
-            return new JdbcSessionRepository(ds);
+            return new JdbcSessionRepository(ds, override);
         }
 
         Connection connection() {
@@ -133,6 +154,7 @@ class JdbcSessionConnectionCleanupTest {
                     metadataGets++;
                     yield proxy(DatabaseMetaData.class, (m, a) -> {
                         if (m.equals("getDatabaseProductName")) return product;
+                        if (m.equals("getDriverName")) return driver;
                         throw new AssertionError(m);
                     });
                 }

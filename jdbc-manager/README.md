@@ -48,8 +48,8 @@ security-sensitive choice.
   persisted. Change flags clear only after a successful commit. A connection-close
   failure after a confirmed commit is logged without misreporting the write as failed.
 - Loads hydrate the underlying MapSession directly, without setAttribute()/save(),
-  reserialization, writes or dirty flags. The listing query orders rows by session
-  ID so each entire session is validated before admission to the listing. If an attribute is oversized, corrupt, null or disallowed, its
+  reserialization, writes or dirty flags. Rows are grouped by session ID in any
+  order. If an attribute is oversized, corrupt, null or disallowed, its
   entire session is omitted for that load, including previously hydrated attributes.
   Healthy sessions remain available from getSessions(); findById() returns null for
   the rejected session. No partially hydrated session escapes and no stored row is
@@ -120,17 +120,31 @@ back with pending edits retained. Concurrent repository writers therefore cannot
 jointly commit an over-budget session. All writers must follow this parent-row
 locking protocol; direct external attribute writes are outside this guarantee.
 Unchanged objects are neither reserialized nor rewritten. Database capabilities are
-captured lazily once per repository; its DataSource must target one database product.
-PostgreSQL/H2 use COUNT and SUM(OCTET_LENGTH), Oracle uses SUM(DBMS_LOB.GETLENGTH),
-and SQL Server uses SUM(CAST(DATALENGTH(...) AS BIGINT)). SQL Server's
-[DATALENGTH](https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql)
-counts bytes of binary values. Other JDBC BLOB databases use a portable fallback:
-a bounded number of BLOB locators, Blob.length(), and Blob.free(), without reading
-payload streams. Driver-internal BLOB materialization remains driver-dependent.
-Known scalar queries transfer one count/byte-total row; the database evaluates the
-aggregate while holding the parent lock. Empty new sessions and saves without
-attribute changes skip validation. PostgreSQL BYTEA writes use setBinaryStream;
-other products retain the original setBlob binding, including Oracle BLOB writes.
+cached lazily without holding a repository monitor over metadata I/O; concurrent
+first use may detect the same immutable enum more than once. A DataSource must
+still target one database family. Detection recognizes PostgreSQL driver identity
+as well as product names, so compatible servers need not report exactly PostgreSQL.
+MySQL and MariaDB use OCTET_LENGTH, Db2 uses LENGTH on binary columns, and the
+existing PostgreSQL/H2, Oracle and SQL Server scalar policies remain available.
+Each optimized check returns one count/byte-total row under the parent lock.
+Empty new sessions and saves without attribute changes skip validation.
+
+For nonstandard proxies or metadata, select a policy explicitly rather than relying
+on name detection, for example:
+
+```java
+new JdbcSessionRepository(dataSource, JdbcSessionDialect.POSTGRESQL);
+```
+
+An unrecognized product/driver logs a warning before retaining the JDBC BLOB-locator
+fallback (Blob.length()/Blob.free()). Locator materialization remains driver-dependent;
+this fallback is not a claim of efficient validation on every driver. PostgreSQL
+BYTEA uses binary-stream binding; other policies retain setBlob. Explicit BLOB
+selection is available for SQL BLOB storage. SQL/driver behavior for Oracle, SQL
+Server, MySQL, MariaDB and Db2 is covered by scripted contract tests, not live-driver
+qualification. See the vendor [Db2 LENGTH](https://www.ibm.com/docs/en/db2/11.5.x?topic=functions-length)
+and [MariaDB OCTET_LENGTH](https://mariadb.com/docs/server/reference/sql-functions/string-functions/octet_length)
+definitions for binary byte-length semantics.
 
 Only saves that need stored validation inspect isolation and temporarily select
 READ_COMMITTED if necessary. The original isolation is restored only when changed.
@@ -148,23 +162,25 @@ sessions. Listing budgets apply only to getSessions()/extractData(), independent
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
-A complete session is decoded within its attribute/session ceilings before it is
-charged to the listing byte budget. A valid prefix that exceeds remaining listing
-space therefore cannot fail the listing if a later attribute rejects that session.
-Whole valid sessions alone consume the result budget. Admission is independent of
-attribute order and session order. Attribute-byte limits take precedence over
-session-byte limits on an exact tie.
+The public extractData(ResultSet) helper accepts interleaved session IDs. Hydration
+tracks each session independently and checks the final listing byte total only after
+all rows have determined which sessions are valid. Valid prefixes from ultimately
+rejected sessions do not consume the final result budget. Attribute-byte limits
+still take precedence over session-byte limits on an exact tie.
 
-The public extractData(ResultSet) helper now requires rows contiguous by session
-ID, matching the repository's ORDER BY query. Interleaved session IDs throw
-SQLException explicitly. Callers of that helper must order their input accordingly;
-it no longer accepts interleaved groups. This lets hydration retain a bounded
-listing plus one candidate session and one bounded attribute read buffer rather
-than buffering every incomplete session. The candidate is limited by
-maxSessionBytes, its read buffer by the remaining session/per-attribute ceiling
-plus one sentinel byte. These are serialized-size accounting limits, not exact
-bounds on decoded heap. The listed row/session-count budgets include rejected
-sessions and continue to bound traversal.
+To bound provisional data without ordering or a database-wide BLOB-row sort, live
+staged serialized-size accounting is capped at maxListingBytes + maxSessionBytes.
+One additional attribute read buffer is bounded by the remaining session/per-attribute
+ceiling plus one sentinel byte. Rejection releases that session's staged accounting.
+Staging excess is reported distinctly as "staging bytes"; it can refuse a stream
+with too many unfinished sessions even if future rows would reject some of them.
+This is a work-memory ceiling, separate from the final valid-result byte limit.
+Row and distinct-session limits also include rejected sessions. These serialized
+size budgets are not exact decoded-heap or driver-buffering bounds.
+
+The production listing query has no ORDER BY and the extractor imposes no ordering
+requirement. Application budgets bound consumption, not every database query plan's
+upstream work; this change adds no schema migration or index requirement.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
@@ -179,10 +195,13 @@ inventories. No production-driver or live deployment qualification is implied.
 
 ### Disposable PostgreSQL contract
 
-The opt-in test exercises concurrent inserts, growing existing attributes through
-UPDATE, and batched removal-plus-add deltas against PostgreSQL. It also verifies
-that borrowed connections return to SERIALIZABLE and autocommit after successful
-commits and budget rollbacks. It creates and drops only a uniquely named test schema.
+The PostgreSQL contract exercises concurrent inserts, growing UPDATEs, removal-plus-add
+deltas, BYTEA streamed lookup, lookup row limits, healthy/rejected listings, and the
+public extractor on deliberately interleaved rows. A separate OID fixture exercises
+real large-object locator budget validation (not general PostgreSQL OID session-read
+support). Test-owned large objects are unlinked before dropping that fixture schema.
+Connections return to SERIALIZABLE and autocommit after commits and budget rollbacks.
+The tests create and drop uniquely named schemas only.
 Supply an explicitly disposable database URL (credentials below are synthetic):
 
 ```sh
@@ -192,9 +211,10 @@ mvn -pl jdbc-manager -am -Pjdbc-postgres-tests \
 ```
 
 The normal local suite skips this test and does not open PostgreSQL connections.
-The JDBC session contracts GitHub Actions job provisions a disposable PostgreSQL 18
-service and runs this profile on both target branches' PRs, alongside the H2 and
-scripted JDBC failure/dialect tests. The PostgreSQL driver version is managed in
+The narrow, path-filtered JDBC session contracts job runs on PRs targeting master
+or 2.x only, alongside H2 and scripted JDBC tests. It has no default-branch push
+trigger. Action commits and the disposable PostgreSQL image are pinned to verified
+SHAs/digest in [.github/workflows/jdbc-tests.yml](../.github/workflows/jdbc-tests.yml). The PostgreSQL driver version is managed in
 the parent POM. The default suite tests Oracle/SQL Server SQL selection and binding,
 unknown-product fallback, settings-call counts, and rollback/restore/abort failures
 through scripted JDBC objects; those tests do not qualify vendor drivers. Local
