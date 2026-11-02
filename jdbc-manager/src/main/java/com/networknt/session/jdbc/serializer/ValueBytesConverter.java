@@ -20,8 +20,6 @@ public class ValueBytesConverter {
 
 
 
-    /** Construction-time byte policy shared by stream staging, serialization and deserialization. */
-    public int getMaxSerializedBytes() { return maxSerializedBytes; }
 
     public Object deserialize(byte[] source) throws SerializationFailedException {
         if (source == null) {

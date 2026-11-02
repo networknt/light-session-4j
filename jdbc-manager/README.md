@@ -161,47 +161,29 @@ IllegalStateException) with typed reason, measured size and limit; pending edits
 remain available for correction.
 
 Read hydration rejects the entire over-budget session while retaining healthy
-sessions. Listing budgets apply only to getSessions()/extractData(), independently of the
+sessions. Listing budgets apply only to getSessions(), independently of the
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
 getSessions() does not stage payloads or use temporary storage. It reads a bounded
 list of live IDs, closes that cursor, then reads and validates each complete session
 through the primary-key lookup. This takes one ID query plus up to maxListingSessions
-session queries; it avoids a global BLOB-row sort and MARS requirements. Row work is
+session queries using one prepared statement with rebound parameters; it avoids a global BLOB-row sort and MARS requirements. Row work is
 counted across the session reads, and only fully valid sessions consume the listing
 byte budget. Payload retention is the accepted result plus one bounded candidate.
-Concurrent deletions/updates may be observed between queries: the API does not
-promise a transactionally consistent cross-session snapshot. Query failures discard
+Deleted sessions and sessions that expire before their payload query are omitted.
+Refreshes and attribute updates completed before that query are read from the database;
+newly live sessions absent from the initial ID selection appear on the next listing.
+The API does not promise a transactionally consistent cross-session snapshot. Query failures discard
 partial results; cleanup-only cursor/connection failures are logged after successful
 reads and do not discard valid data.
 
-The public extractData(ResultSet) helper still accepts arbitrary interleaved IDs.
-It buffers raw bytes in memory up to maxListingBytes + maxSessionBytes, releasing
-rejected or decoded buffers promptly. Small calls need no file or crypto provider.
-Only larger unresolved inputs spill to an extraction-local encrypted temp file;
-this preserves the unordered helper contract without a row-order-dependent policy
-refusal. Values are decoded once, one session at a time, and never reserialized.
-Use getSessions() for the built-in disk-free listing path.
-
-A spill uses AES-GCM with a fresh extraction-only key, offset-bound authenticated
-records, and one reusable encrypt/decrypt cipher pair. Each record is initialized
-with its own nonce; provider lookup is per spill, not per record. No cleartext or
-key material is written to the file. Files are owner-only on POSIX and opened with
-DELETE_ON_CLOSE. Workfile close failures are logged after a successful extraction,
-or suppressed on the original failure. There is no shared-temp-directory sweeper
-that might delete another active extraction's file. A failed provider cleanup can
-leave ciphertext for operator/filesystem maintenance; getSessions creates none.
-
-For custom extractor calls that spill, the remaining disk upper bound is
-maxListingSessions × maxSessionBytes plus 28 × maxListingRows bytes of nonce/tag
-overhead. This bound is not the result byte budget. Rejected prefixes can remain
-on disk until close. java.io.tmpdir selects spill storage; unavailable storage or
-actual staging/crypto failure fails that large extraction explicitly. These spill
-risks no longer apply to getSessions() or small buffered helper calls. Decoded heap,
-filesystem cache/tmpfs RAM and driver buffers are not exact serialized-byte sizes.
-The converter's single captured attribute limit governs both raw staging reads and
-deserialization; the repository does not re-read that policy property.
+The public extractData(ResultSet) compatibility helper is deprecated. It still maps
+arbitrary interleaved IDs and shares the same per-attribute/per-session hydration
+checks, but its caller owns the total query-row and output-size bounds. Use
+getSessions() for aggregate listing budgets, or findById() for a bounded lookup.
+The helper decodes directly without retaining raw serialized buffers. Neither path
+uses temporary files, spill storage, or encryption machinery.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
