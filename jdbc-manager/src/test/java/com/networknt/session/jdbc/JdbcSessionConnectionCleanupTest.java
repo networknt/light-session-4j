@@ -11,18 +11,19 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Scripted JDBC failures: tests repository ordering/cleanup, not vendor implementations. */
 @org.junit.jupiter.api.parallel.Isolated
 class JdbcSessionConnectionCleanupTest {
-    @Test void loadedAccessBindsComputedExpiryUsingOnlyOnePlainUpdateForEveryDialect() {
+    @Test void accessUsesOneTimestampUpdateForEveryDialectAndPendingTimeout() {
         for (String product : List.of("Oracle", "Microsoft SQL Server", "DB2/LINUXPPC64LE", "PostgreSQL", "H2", "unknown")) {
             Stub jdbc = new Stub(); jdbc.product = product;
-            var repo = jdbc.repository();
-            MapSession delegate = new MapSession("loaded"); delegate.setMaxInactiveInterval(60);
-            var session = repo.new JdbcSession(delegate);
-            session.setLastAccessedTime(10_000L);
-            assertEquals(List.of("UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = ? WHERE SESSION_ID = ? AND MAX_INACTIVE_INTERVAL = ?"), jdbc.queries);
-            assertEquals(Map.of(1, 10_000L, 2, 70_000L, 3, "loaded", 4, 60), jdbc.accessParameters);
-            assertEquals(0, jdbc.metadataGets, "Access must not perform vendor detection or timeout queries");
+            var repo = jdbc.repository(); var session = repo.new JdbcSession(new MapSession("loaded"));
+            session.setMaxInactiveInterval(60); session.setLastAccessedTime(10_000L);
+            assertEquals(List.of("UPDATE light_session SET LAST_ACCESS_TIME = ? WHERE SESSION_ID = ?"), jdbc.queries);
+            assertEquals(Map.of(1, 10_000L, 2, "loaded"), jdbc.accessParameters);
+            assertEquals(0, jdbc.metadataGets);
             session.setMaxInactiveInterval(-1); session.setLastAccessedTime(20_000L);
-            assertEquals(80_000L, jdbc.accessParameters.get(2), "Pending timeout must not affect stored expiry");
+            assertEquals(Map.of(1, 20_000L, 2, "loaded"), jdbc.accessParameters);
+            repo.updateSessionLastAccessTime("missing");
+            assertEquals(3, jdbc.queries.size());
+            assertTrue(jdbc.queries.stream().allMatch(q -> q.equals(jdbc.queries.getFirst())), "No timeout lookup or retry query");
         }
     }
 
