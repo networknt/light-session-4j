@@ -69,12 +69,8 @@ large application data out of session attributes, or use a reviewed temporary
 limit increase. Applications must handle unavailable sessions through their normal
 session-invalid/missing behavior. Preserve least-privilege database writes.
 
-**This remains a per-attribute policy.** There is no attribute-count limit,
-per-session aggregate byte/decoded-heap budget, or listing-wide memory limit.
-getSessions() still materializes its valid results. Aggregate budgets and a paginated
-listing API need a separate policy/API change; this PR does not claim to solve them.
-Write preflight also buffers all pending attributes, so applications must budget
-session size and edit volume accordingly.
+Serialized-byte and count budgets now cover sessions and listings as described below.
+Decoded heap is still not bounded precisely; getSessions() materializes its bounded results.
 
 The application bounds stream consumption, but a JDBC driver may buffer a column
 internally. Review production drivers and database-side size constraints, such as
@@ -115,13 +111,22 @@ integer system properties captured when a repository is constructed:
 | maxListingRows | 65000 JDBC result rows |
 
 Existing per-attribute byte and object-graph/class restrictions still apply.
-Save validates all current attributes, including unchanged ones, before acquiring
-a connection. Aggregate rejection throws without clearing pending edits or writing
-rows. This preflight re-serializes unchanged attributes on writes; serializers
-must therefore support repeat serialization. It does not rewrite attributes on reads.
+Save serializes only pending values before acquiring a connection. Obvious pending
+count/byte excess fails before SQL. The transaction writes the parent session row
+first (holding its database write lock), applies the delta, and validates the actual
+stored attribute count and serialized lengths before commit. An over-budget result rolls
+back with pending edits retained. Concurrent repository writers therefore cannot
+jointly commit an over-budget session. All writers must follow this parent-row
+locking protocol; direct external attribute writes are outside this guarantee.
+Unchanged objects are neither reserialized nor rewritten. Validation scans stored
+binary streams with a fixed-size buffer and stops at the session budget plus one
+byte; it does not decode them. Saves use READ_COMMITTED so the validation statement
+sees earlier writers after acquiring the parent lock.
 
 Read hydration rejects the entire over-budget session while retaining healthy
-sessions. A listing that exceeds a listing budget throws IllegalStateException;
+sessions. Listing budgets apply only to getSessions()/extractData(), independently of the
+per-session budgets; they may deliberately be smaller. findById() uses only
+per-session and per-attribute limits. A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
 is bounded before ObjectInputStream is constructed. Inventory existing sessions
 before upgrading; a previously accepted large session can now be unavailable.
