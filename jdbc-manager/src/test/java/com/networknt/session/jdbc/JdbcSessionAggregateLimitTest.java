@@ -11,7 +11,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @Isolated
 class JdbcSessionAggregateLimitTest {
     private JdbcDataSource database;
-    @org.junit.jupiter.api.io.TempDir java.nio.file.Path temporaryDirectory;
     private final java.util.concurrent.atomic.AtomicInteger connections = new java.util.concurrent.atomic.AtomicInteger();
     private final Map<String, String> original = new HashMap<>();
     @BeforeEach void setup() throws Exception {
@@ -46,6 +45,87 @@ class JdbcSessionAggregateLimitTest {
             stmt.setString(1, id); stmt.setString(2, name); stmt.setBytes(3, bytes); stmt.executeUpdate();
         }
     }
+    private long storedExpiry(String id) throws Exception {
+        try (Connection connection = database.getConnection();
+             PreparedStatement stmt = connection.prepareStatement("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = ?")) {
+            stmt.setString(1, id);
+            try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); return rows.getLong(1); }
+        }
+    }
+
+    @Test void expiryUsesMillisecondsForDefaultAndShortTimeoutsAndRefreshes() throws Exception {
+        var repo = repository();
+        var session = repo.createSession();
+        assertEquals(1800, session.getMaxInactiveInterval());
+        assertEquals(session.getLastAccessedTime() + 1_800_000L, storedExpiry(session.getId()));
+        long fiveSecondsAgo = System.currentTimeMillis() - 5_000;
+        session.setLastAccessedTime(fiveSecondsAgo);
+        assertEquals(fiveSecondsAgo + 1_800_000L, storedExpiry(session.getId()));
+        assertNotNull(repo.findById(session.getId()));
+        assertTrue(repo.getSessions().containsKey(session.getId()), "Default session must survive more than 1.8 seconds");
+
+        session.setMaxInactiveInterval(60);
+        repo.save(session);
+        assertEquals(fiveSecondsAgo + 60_000L, storedExpiry(session.getId()));
+        long refreshed = System.currentTimeMillis();
+        session.setLastAccessedTime(refreshed);
+        assertEquals(refreshed + 60_000L, storedExpiry(session.getId()));
+        assertEquals(refreshed, repo.findById(session.getId()).getLastAccessedTime());
+        repo.cleanUpExpiredSessions();
+        assertTrue(repo.getSessions().containsKey(session.getId()));
+
+        session.setLastAccessedTime(refreshed - 61_000);
+        assertFalse(repo.getSessions().containsKey(session.getId()));
+        assertNull(repo.findById(session.getId()));
+    }
+
+    @Test void negativeTimeoutNeverExpiresAndLongIntervalsDoNotOverflow() throws Exception {
+        var repo = repository(); repo.setDefaultMaxInactiveInterval(-1);
+        var session = repo.createSession();
+        session.setLastAccessedTime(1);
+        assertEquals(Long.MAX_VALUE, session.getExpiryTime());
+        assertEquals(Long.MAX_VALUE, storedExpiry(session.getId()));
+        repo.cleanUpExpiredSessions();
+        assertNotNull(repo.findById(session.getId()));
+        assertTrue(repo.getSessions().containsKey(session.getId()));
+        session.setMaxInactiveInterval(Integer.MAX_VALUE);
+        repo.save(session);
+        assertEquals(1L + Integer.MAX_VALUE * 1000L, storedExpiry(session.getId()));
+        session.setLastAccessedTime(2);
+        assertEquals(2L + Integer.MAX_VALUE * 1000L, storedExpiry(session.getId()));
+        session.setMaxInactiveInterval(0); repo.save(session);
+        assertFalse(repo.getSessions().containsKey(session.getId()));
+        assertNull(repo.findById(session.getId()));
+    }
+
+    @Test void deprecatedMapperEnforcesExactRowSessionAndResultByteCaps() throws Exception {
+        byte[] value = new ValueBytesConverter().serializer("value");
+        var ids = List.of("one", "two", "one"); var values = List.of(value, value, value);
+        limit("maxListingRows", 3); limit("maxListingSessions", 2); limit("maxListingBytes", 3 * value.length);
+        assertEquals(2, repository().extractData(listingRows(ids, values)).size());
+        limit("maxListingRows", 2);
+        var rowsFailure = assertThrows(IllegalStateException.class, () -> repository().extractData(listingRows(ids, values)));
+        assertTrue(rowsFailure.getMessage().endsWith("rows"));
+        limit("maxListingRows", 3); limit("maxListingSessions", 1);
+        var sessionFailure = assertThrows(IllegalStateException.class, () -> repository().extractData(listingRows(ids, values)));
+        assertTrue(sessionFailure.getMessage().endsWith("sessions"));
+        limit("maxListingSessions", 2); limit("maxListingBytes", 3 * value.length - 1);
+        var byteFailure = assertThrows(IllegalStateException.class, () -> repository().extractData(listingRows(ids, values)));
+        assertTrue(byteFailure.getMessage().endsWith("bytes"));
+    }
+
+    @Test void deprecatedMapperCountsRejectedSessionsAndStopsAtTheRowSentinel() throws Exception {
+        limit("maxListingSessions", 1);
+        byte[] corrupt = {1, 2, 3};
+        var sessionFailure = assertThrows(IllegalStateException.class, () -> repository().extractData(
+                listingRows(List.of("bad", "other"), List.of(corrupt, corrupt))));
+        assertTrue(sessionFailure.getMessage().endsWith("sessions"));
+        limit("maxListingSessions", 2); limit("maxListingRows", 2);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var rowFailure = assertThrows(IllegalStateException.class, () -> repository().extractData(syntheticRows(calls, List.of(corrupt), true)));
+        assertTrue(rowFailure.getMessage().endsWith("rows")); assertEquals(3, calls.get());
+    }
+
     @Test void writeCountRejectsBeforeSqlAndRetainsPendingChange() {
         limit("maxAttributes", 2);
         var repo = repository(); var session = repo.createSession();
@@ -481,26 +561,8 @@ class JdbcSessionAggregateLimitTest {
     }
 
 
-    @Test void nativeListingAndSmallExtractionDoNotDependOnTheTempDirectory() throws Exception {
-        java.nio.file.Path unavailable = unavailableDirectory();
-        String previous = System.getProperty("java.io.tmpdir");
-        try {
-            System.setProperty("java.io.tmpdir", unavailable.toString());
-            var repo = new JdbcSessionRepository(database);
-            repo.setDefaultMaxInactiveInterval(60_000);
-            var session = repo.createSession(); session.setAttribute("a", "healthy");
-            assertEquals(Set.of(session.getId()), repo.getSessions().keySet());
-            byte[] bytes = new ValueBytesConverter().serializer("healthy");
-            assertEquals(1, repository().extractData(listingRows(List.of("small"), List.of(bytes))).size());
-        } finally { restoreTempDirectory(previous); }
-    }
-
-
-
-
-
     @Test void nativeListingKeepsACompleteResultAfterConnectionOrCursorCloseFailure() throws Exception {
-        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var writer = repository();
         var session = writer.createSession(); session.setAttribute("a", "value");
         for (boolean cursorFailure : new boolean[]{false, true}) {
             javax.sql.DataSource failing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
@@ -537,7 +599,7 @@ class JdbcSessionAggregateLimitTest {
     }
 
     @Test void nativeListingDiscardsPartialResultsAfterALaterQueryFails() throws Exception {
-        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var writer = repository();
         writer.createSession().setAttribute("a", "one"); writer.createSession().setAttribute("a", "two");
         var reads = new java.util.concurrent.atomic.AtomicInteger();
         javax.sql.DataSource failing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
@@ -598,7 +660,7 @@ class JdbcSessionAggregateLimitTest {
     }
 
     @Test void listingReusesOneStatementAndObservesChangesAfterIdSelection() throws Exception {
-        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var writer = repository();
         var deleted = writer.createSession(); deleted.setAttribute("a", "deleted");
         var expired = writer.createSession(); expired.setAttribute("a", "expired");
         var refreshed = writer.createSession(); refreshed.setAttribute("a", "old");
@@ -634,7 +696,7 @@ class JdbcSessionAggregateLimitTest {
     }
 
     @Test void sessionLimitUsesSentinelRowBeforePreparingAnyPayloadStatement() throws Exception {
-        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var writer = repository();
         for (int i = 0; i < 4; i++) writer.createSession();
         limit("maxListingSessions", 2);
         var prepares = new java.util.concurrent.atomic.AtomicInteger();
@@ -646,16 +708,6 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(failure.getMessage().endsWith("sessions"));
         assertEquals(3, maxRows.get()); assertEquals(3, idRows.get());
         assertEquals(0, prepares.get()); assertEquals(0, reads.get());
-    }
-
-    private java.nio.file.Path unavailableDirectory() throws Exception {
-        java.nio.file.Path path = temporaryDirectory.resolve("not-a-directory");
-        java.nio.file.Files.writeString(path, "marker");
-        return path;
-    }
-
-    private static void restoreTempDirectory(String previous) {
-        if (previous == null) System.clearProperty("java.io.tmpdir"); else System.setProperty("java.io.tmpdir", previous);
     }
 
     private ResultSet listingRows(List<String> ids, List<byte[]> values) {

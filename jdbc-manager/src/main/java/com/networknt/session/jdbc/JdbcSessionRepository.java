@@ -80,7 +80,8 @@ public class JdbcSessionRepository implements
                     "WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
-            "UPDATE light_session SET  LAST_ACCESS_TIME = ? " +
+            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = " +
+                    "CASE WHEN MAX_INACTIVE_INTERVAL < 0 THEN ? ELSE ? + CAST(MAX_INACTIVE_INTERVAL AS DECIMAL(19, 0)) * 1000 END " +
                     "WHERE SESSION_ID = ?";
 
 
@@ -169,40 +170,63 @@ public class JdbcSessionRepository implements
     public Map<String, Session> getSessions() {
         try {
             return readResource(dataSource.getConnection(), connection -> {
-                List<String> ids = readResource(connection.prepareStatement(getAllSessionQuery), stmt -> {
-                    stmt.setLong(1, System.currentTimeMillis());
-                    stmt.setMaxRows(limits.sessions + 1);
-                    return readResource(stmt.executeQuery(), rows -> {
-                        List<String> selected = new ArrayList<>();
-                        while (rows.next()) {
-                            if (selected.size() >= limits.sessions) throw new ListingLimitException("sessions");
-                            selected.add(rows.getString("SESSION_ID"));
-                        }
-                        return selected;
-                    }, "listing ID cursor");
-                }, "listing ID statement");
-                // The ID cursor is closed before payload reads; no MARS requirement.
-                return readResource(connection.prepareStatement(getListingSessionQuery), stmt -> {
-                    stmt.setMaxRows(limits.attributes + 1);
-                    ListingReadBudget budget = new ListingReadBudget();
-                    Map<String, Session> sessions = new HashMap<>();
-                    for (String id : ids) {
-                        stmt.setString(1, id);
-                        // Recheck expiry at hydration time; listing is a best-effort view.
-                        stmt.setLong(2, System.currentTimeMillis());
-                        Hydration state = readResource(stmt.executeQuery(), rows -> extractSingleSession(rows, budget), "listing session cursor");
-                        if (state != null) {
-                            budget.admit(state.bytes);
-                            sessions.put(id, state.session);
-                        }
-                    }
-                    return sessions;
-                }, "listing session statement");
+                List<String> ids = readIds(connection);
+                return readSessions(connection, ids);
             }, "listing connection");
         } catch (SQLException e) {
             logger.error("SqlException:", e);
             return new HashMap<>();
         }
+    }
+
+    private List<String> readIds(Connection connection) throws SQLException {
+        return readResource(connection.prepareStatement(getAllSessionQuery), stmt -> {
+            stmt.setLong(1, System.currentTimeMillis());
+            stmt.setMaxRows(limits.sessions + 1);
+            return readResource(stmt.executeQuery(), this::collectIds, "listing ID cursor");
+        }, "listing ID statement");
+    }
+
+    private List<String> collectIds(ResultSet rows) throws SQLException {
+        List<String> ids = new ArrayList<>();
+        while (rows.next()) {
+            if (ids.size() >= limits.sessions) throw new ListingLimitException("sessions");
+            ids.add(rows.getString("SESSION_ID"));
+        }
+        return ids;
+    }
+
+    private Map<String, Session> readSessions(Connection connection, List<String> ids) throws SQLException {
+        // The ID cursor is closed before payload reads; no MARS requirement.
+        return readResource(connection.prepareStatement(getListingSessionQuery), stmt -> {
+            stmt.setMaxRows(limits.attributes + 1);
+            ListingReadBudget budget = new ListingReadBudget();
+            Map<String, Session> sessions = new HashMap<>();
+            for (String id : ids) {
+                stmt.setString(1, id);
+                // Recheck expiry at hydration time; listing is a best-effort view.
+                stmt.setLong(2, System.currentTimeMillis());
+                Hydration state = readSession(stmt, budget);
+                if (state != null) {
+                    budget.admit(state.bytes);
+                    sessions.put(id, state.session);
+                }
+            }
+            return sessions;
+        }, "listing session statement");
+    }
+
+    private Hydration readSession(PreparedStatement stmt, ListingReadBudget budget) throws SQLException {
+        return readResource(stmt.executeQuery(), rows -> extractSingleSession(rows, budget), "session cursor");
+    }
+
+    private JdbcSession readSession(Connection connection, String id) throws SQLException {
+        return readResource(connection.prepareStatement(getSessionQuery), stmt -> {
+            stmt.setString(1, id);
+            stmt.setMaxRows(limits.attributes + 1);
+            Hydration state = readSession(stmt, null);
+            return state == null ? null : state.session;
+        }, "lookup statement");
     }
 
     private final class ListingReadBudget {
@@ -425,13 +449,7 @@ public class JdbcSessionRepository implements
     public JdbcSession findById(final String id) {
         JdbcSession session = null;
         try {
-            session = readResource(dataSource.getConnection(), connection ->
-                    readResource(connection.prepareStatement(getSessionQuery), stmt -> {
-                        stmt.setString(1, id);
-                        stmt.setMaxRows(limits.attributes + 1);
-                        Hydration state = readResource(stmt.executeQuery(), rows -> extractSingleSession(rows, null), "lookup cursor");
-                        return state == null ? null : state.session;
-                    }, "lookup statement"), "lookup connection");
+            session = readResource(dataSource.getConnection(), connection -> readSession(connection, id), "lookup connection");
         } catch (SQLException e) {
             logger.error("SqlException:", e);
         }
@@ -476,11 +494,16 @@ public class JdbcSessionRepository implements
     }
 
     public void updateSessionLastAccessTime(final String id) {
-        int count = 0;
+        updateSessionLastAccessTime(id, System.currentTimeMillis());
+    }
+
+    private void updateSessionLastAccessTime(String id, long lastAccessedTime) {
         try (final Connection connection = dataSource.getConnection()) {
             try (PreparedStatement psAtt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
-                psAtt.setLong(1, System.currentTimeMillis());
-                psAtt.setString(2, id);
+                psAtt.setLong(1, lastAccessedTime);
+                psAtt.setLong(2, Long.MAX_VALUE);
+                psAtt.setLong(3, lastAccessedTime);
+                psAtt.setString(4, id);
                 psAtt.executeUpdate();
             }
         } catch (SQLException e) {
@@ -543,24 +566,33 @@ public class JdbcSessionRepository implements
     }
 
     /**
-     * Maps caller-owned rows in arbitrary session order. Per-session limits apply;
-     * callers must bound total query rows and output size themselves.
+     * Maps caller-owned rows in arbitrary session order with row/session-count caps
+     * and a byte cap on the completed valid result. Incomplete sessions remain live
+     * until EOF, bounded by maxListingSessions and maxSessionBytes; prefer getSessions()
+     * to retain only the accepted result plus one candidate.
      * @deprecated Use {@link #getSessions()} for aggregate listing limits, or {@link #findById(String)}.
      */
     @Deprecated
     public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
         Map<String, Hydration> states = new LinkedHashMap<>();
+        ListingReadBudget budget = new ListingReadBudget();
         while (rs.next()) {
+            budget.row();
             String id = rs.getString("SESSION_ID");
             Hydration state = states.get(id);
             if (state == null) {
+                if (states.size() >= limits.sessions) throw new ListingLimitException("sessions");
                 state = hydration(rs, id);
                 states.put(id, state);
             }
             if (state.session != null) hydrateAttribute(rs, state, id);
         }
         List<JdbcSession> sessions = new ArrayList<>();
-        for (Hydration state : states.values()) if (state.session != null) sessions.add(state.session);
+        for (Hydration state : states.values()) {
+            if (state.session == null) continue;
+            budget.admit(state.bytes);
+            sessions.add(state.session);
+        }
         return sessions;
     }
 
@@ -648,7 +680,7 @@ public class JdbcSessionRepository implements
 
 
         public long getExpiryTime() {
-            return getLastAccessedTime() + getMaxInactiveInterval();
+            return getMaxInactiveInterval() < 0 ? Long.MAX_VALUE : getLastAccessedTime() + getMaxInactiveInterval() * 1000L;
         }
 
         @Override
@@ -700,7 +732,7 @@ public class JdbcSessionRepository implements
         public void setLastAccessedTime(long lastAccessedTime) {
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
-            JdbcSessionRepository.this.updateSessionLastAccessTime(this.getId());
+            JdbcSessionRepository.this.updateSessionLastAccessTime(this.getId(), lastAccessedTime);
         }
 
         @Override

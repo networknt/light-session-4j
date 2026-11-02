@@ -161,7 +161,7 @@ IllegalStateException) with typed reason, measured size and limit; pending edits
 remain available for correction.
 
 Read hydration rejects the entire over-budget session while retaining healthy
-sessions. Listing budgets apply only to getSessions(), independently of the
+sessions. Listing budgets apply to getSessions() and the deprecated extractData() helper, independently of the
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
@@ -178,12 +178,21 @@ The API does not promise a transactionally consistent cross-session snapshot. Qu
 partial results; cleanup-only cursor/connection failures are logged after successful
 reads and do not discard valid data.
 
-The public extractData(ResultSet) compatibility helper is deprecated. It still maps
-arbitrary interleaved IDs and shares the same per-attribute/per-session hydration
-checks, but its caller owns the total query-row and output-size bounds. Use
-getSessions() for aggregate listing budgets, or findById() for a bounded lookup.
-The helper decodes directly without retaining raw serialized buffers. Neither path
-uses temporary files, spill storage, or encryption machinery.
+The public extractData(ResultSet) compatibility helper is deprecated. It preserves
+arbitrary interleaved IDs, applies row and distinct-session caps while streaming,
+and checks the byte total of valid sessions after all rows are processed. Rejected
+sessions still count toward the distinct-session ceiling. It shares per-session
+hydration with repository reads and does not retain raw serialized buffers.
+Incomplete candidates can coexist until EOF, so peak serialized-equivalent retention
+is bounded by maxListingSessions × maxSessionBytes, rather than maxListingBytes.
+Prefer getSessions(), which retains the accepted result plus one candidate.
+Neither path uses temporary files, spill storage, or encryption machinery.
+
+Expiry timestamps use milliseconds: last-access time plus the timeout in seconds
+multiplied by 1000. A negative timeout stores Long.MAX_VALUE (never expires).
+Request access updates both last-access and expiry in one statement using the stored
+timeout; creates and saves also write the corrected expiry. Existing rows are
+corrected when saved or accessed; this change does not migrate historical timestamps.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption
