@@ -191,64 +191,37 @@ one bounded attribute being hydrated, not maxListingSessions × maxSessionBytes.
 Decoded JVM heap and driver/serializer buffers remain distinct from serialized sizes.
 Neither path uses temporary files, spill storage, or encryption machinery.
 
-Expiry timestamps use milliseconds: last-access time plus timeout seconds × 1000.
-A negative timeout stores Long.MAX_VALUE (never expires). A SQL NULL timeout means
-the MapSession default of 1800 seconds, independently of the configured timeout for
-new sessions. Hydration and both access entry points use this same rule.
-Loaded sessions retain their last persisted timeout separately from pending edits.
-Access computes expiry in Java and conditionally updates last-access/expiry only if
-the stored timeout still matches that snapshot (including an explicit IS NULL branch).
-An unsaved timeout edit does not affect stored expiry. A concurrent save causes the
-access update to reread the timeout and retry, up to three attempts; continued churn
-logs an SQL failure instead of writing inconsistent expiry. The public ID-only method
-reads the stored timeout first and uses the same guarded update. Normal loaded access
-requires one UPDATE, no SELECT or SQL arithmetic; retries read only timeout metadata.
-
-### Upgrade existing expiry timestamps
-
-Stop **all session writers and expiry cleanup** before migration. Mixed-version
-writes are unsupported: an old node can re-corrupt expiry after any successful batch.
-The migration repairs existing rows; it cannot fence old binaries. Do not enable
-listing/cleanup until old nodes are stopped and the final verification sweep completes.
-Resume only corrected-version writers after that sweep; do not restart old binaries.
-
-Use the packaged [migration SQL](src/main/resources/migrations/fix_session_expiry_milliseconds.sql)
-as a PreparedStatement with two VARCHAR parameters: the first and last session IDs
-in a bounded batch, inclusive. There is deliberately no trailing semicolon for JDBC,
-including Oracle. It normalizes NULL timeouts to 1800 seconds, repairs expiry from
-last-access/timeout, and skips rows already correct:
+Session liveness is derived from LAST_ACCESS_TIME (milliseconds) and
+MAX_INACTIVE_INTERVAL (seconds), in both listing queries and cleanup. Cleanup uses
+the exact complement of the live predicate, including the expiry boundary:
 
 ```sql
-UPDATE light_session
-SET MAX_INACTIVE_INTERVAL = COALESCE(MAX_INACTIVE_INTERVAL, 1800),
-    EXPIRY_TIME = CASE
-    WHEN COALESCE(MAX_INACTIVE_INTERVAL, 1800) < 0 THEN 9223372036854775807
-    ELSE LAST_ACCESS_TIME + CAST(COALESCE(MAX_INACTIVE_INTERVAL, 1800) AS DECIMAL(19, 0)) * 1000
-END
-WHERE SESSION_ID >= ? AND SESSION_ID <= ?
-  AND (MAX_INACTIVE_INTERVAL IS NULL OR EXPIRY_TIME IS NULL OR EXPIRY_TIME <> CASE
-    WHEN COALESCE(MAX_INACTIVE_INTERVAL, 1800) < 0 THEN 9223372036854775807
-    ELSE LAST_ACCESS_TIME + CAST(COALESCE(MAX_INACTIVE_INTERVAL, 1800) AS DECIMAL(19, 0)) * 1000
-END)
+COALESCE(MAX_INACTIVE_INTERVAL, 0) < 0
+OR LAST_ACCESS_TIME
+   + CAST(COALESCE(MAX_INACTIVE_INTERVAL, 0) AS DECIMAL(19, 0)) * 1000 > ?
 ```
 
-Choose a batch size suitable for the deployment (for example, 1000 IDs). Read IDs
-using `SELECT SESSION_ID FROM light_session ORDER BY SESSION_ID` with JDBC
-setMaxRows(batchSize). For subsequent batches use
-`SELECT SESSION_ID FROM light_session WHERE SESSION_ID > ? ORDER BY SESSION_ID`,
-binding the last committed ID and using the same row cap. Bind each batch's first/last
-returned IDs to the UPDATE. Commit each batch, then record its upper ID checkpoint.
-On restart, resume after that checkpoint; if commit status is uncertain, rerun that
-same inclusive range. The mismatch predicate makes retries idempotent. No batch
-updates IDs outside its bounds, and every batch contains at most the selected number
-of IDs while writers remain stopped.
+A negative timeout never expires. SQL NULL retains the historical getInt(NULL) = 0
+behavior: it means zero timeout, not a new 1800-second default. Reads do not rewrite
+MAX_INACTIVE_INTERVAL. Widening before multiplication supports large integer timeouts.
 
-After completing the batches, rescan from the beginning and rerun bounded ranges;
-a clean verification sweep updates zero rows. If expiry is changed again, keep
-cleanup disabled, stop the remaining old writer, and repeat the sweep. No automatic
-startup migration runs. The migration and restart/re-corruption regressions run on
-H2 and PostgreSQL. Validate the statement with the deployment's schema/driver before
-upgrading other database products; Oracle, SQL Server and Db2 are not live-qualified.
+Access updates only LAST_ACCESS_TIME in one statement. Pending timeout edits take
+effect in the database when save() writes MAX_INACTIVE_INTERVAL. No timeout snapshot,
+lookup, conditional-update variant or retry loop is needed. Deleting the row before
+an access update simply leaves no row to update.
+
+EXPIRY_TIME remains in the schema and is written on full saves for compatibility,
+but this repository does not use it to determine liveness. Stale, NULL, or future
+cache values, including values rewritten by old writers, cannot hide live sessions
+or preserve expired sessions in the corrected listing/cleanup paths. No expiry
+migration, custom runner, checkpoint process or writer shutdown is required.
+Older binaries that still run their own EXPIRY_TIME-based listing/cleanup retain
+that historical bug; upgrade those readers/cleanup implementations before using them.
+
+The computed predicate may scan session metadata and cannot rely on an index on
+EXPIRY_TIME. It avoids reading attribute payloads during ID selection; result limits
+do not claim to bound database scan work. H2 and PostgreSQL exercise the predicate;
+other vendor drivers retain scripted-only qualification.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption

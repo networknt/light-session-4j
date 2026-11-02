@@ -70,23 +70,23 @@ public class JdbcSessionRepository implements
                     "LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
                     "WHERE S.SESSION_ID = ?";
 
-    private static final String GET_LISTING_SESSION_QUERY = GET_SESSION_QUERY + " AND S.EXPIRY_TIME > ?";
+    // Canonical liveness: getInt(NULL) historically means zero timeout, as in hydration.
+    // Widen before multiplying so large int timeouts do not overflow in SQL.
+    private static final String LIVE_SESSION_PREDICATE =
+            "(COALESCE(MAX_INACTIVE_INTERVAL, 0) < 0 OR " +
+                    "LAST_ACCESS_TIME + CAST(COALESCE(MAX_INACTIVE_INTERVAL, 0) AS DECIMAL(19, 0)) * 1000 > ?)";
+
+    private static final String GET_LISTING_SESSION_QUERY = GET_SESSION_QUERY + " AND " + LIVE_SESSION_PREDICATE;
 
     private static final String GET_ALL_SESSION_QUERY =
-            "SELECT SESSION_ID FROM light_session WHERE EXPIRY_TIME > ?";
+            "SELECT SESSION_ID FROM light_session WHERE " + LIVE_SESSION_PREDICATE;
 
     private static final String UPDATE_SESSION_QUERY =
             "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
                     "WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
-            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = ? WHERE SESSION_ID = ? AND MAX_INACTIVE_INTERVAL = ?";
-
-    private static final String UPDATE_NULL_TIMEOUT_ACCESS_QUERY =
-            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = ? WHERE SESSION_ID = ? AND MAX_INACTIVE_INTERVAL IS NULL";
-
-    private static final String GET_SESSION_TIMEOUT_QUERY =
-            "SELECT MAX_INACTIVE_INTERVAL FROM light_session WHERE SESSION_ID = ?";
+            "UPDATE light_session SET LAST_ACCESS_TIME = ? WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
             "UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
@@ -110,7 +110,7 @@ public class JdbcSessionRepository implements
 
     private static final String DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY =
             "DELETE FROM light_session " +
-                    "WHERE EXPIRY_TIME < ?";
+                    "WHERE NOT " + LIVE_SESSION_PREDICATE;
 
     private static final Logger logger = LoggerFactory.getLogger(JdbcSessionRepository.class);
 
@@ -497,59 +497,17 @@ public class JdbcSessionRepository implements
         }
     }
 
-    /** Compatibility entry point; refreshes against the current stored timeout. */
     public void updateSessionLastAccessTime(final String id) {
-        try (Connection connection = dataSource.getConnection()) {
-            refreshSessionAccess(connection, id, System.currentTimeMillis(), readStoredTimeout(connection, id));
-        } catch (SQLException e) { logger.error("SqlException:", e); }
+        updateSessionAccess(id, System.currentTimeMillis());
     }
 
-    private void updateSessionAccess(JdbcSession session) {
-        try (Connection connection = dataSource.getConnection()) {
-            StoredTimeout stored = refreshSessionAccess(connection, session.getId(), session.getLastAccessedTime(),
-                    new StoredTimeout(session.storedTimeout));
-            if (stored != null) session.storedTimeout = stored.value();
-        } catch (SQLException e) { logger.error("SqlException:", e); }
-    }
-
-    /** A null record means no row; a null value means the legacy default timeout. */
-    private record StoredTimeout(Integer value) { }
-
-    private StoredTimeout readStoredTimeout(Connection connection, String id) throws SQLException {
-        try (PreparedStatement stmt = connection.prepareStatement(GET_SESSION_TIMEOUT_QUERY)) {
-            stmt.setString(1, id);
-            try (ResultSet rows = stmt.executeQuery()) {
-                if (!rows.next()) return null;
-                int timeout = rows.getInt(1);
-                return new StoredTimeout(rows.wasNull() ? null : timeout);
-            }
-        }
-    }
-
-    private StoredTimeout refreshSessionAccess(Connection connection, String id, long lastAccessedTime, StoredTimeout stored) throws SQLException {
-        // The conditional UPDATE is atomic with a concurrent save of the timeout.
-        for (int attempt = 0; attempt < 3 && stored != null; attempt++) {
-            if (writeSessionAccess(connection, id, lastAccessedTime, stored.value()) == 1) return stored;
-            stored = readStoredTimeout(connection, id);
-        }
-        if (stored != null) throw new SQLException("JDBC session timeout kept changing during access refresh");
-        return null;
-    }
-
-    private int writeSessionAccess(Connection connection, String id, long lastAccessedTime, Integer storedTimeout) throws SQLException {
-        String query = storedTimeout == null ? UPDATE_NULL_TIMEOUT_ACCESS_QUERY : UPDATE_SESSION_ACCESS_TIME_QUERY;
-        int timeout = storedTimeout == null ? MapSession.DEFAULT_MAX_INACTIVE_INTERVAL_SECONDS : storedTimeout;
-        try (PreparedStatement stmt = connection.prepareStatement(query)) {
+    private void updateSessionAccess(String id, long lastAccessedTime) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement stmt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
             stmt.setLong(1, lastAccessedTime);
-            stmt.setLong(2, expiryTime(lastAccessedTime, timeout));
-            stmt.setString(3, id);
-            if (storedTimeout != null) stmt.setInt(4, storedTimeout);
-            return stmt.executeUpdate();
-        }
-    }
-
-    private static long expiryTime(long lastAccessedTime, int timeout) {
-        return timeout < 0 ? Long.MAX_VALUE : lastAccessedTime + timeout * 1000L;
+            stmt.setString(2, id);
+            stmt.executeUpdate();
+        } catch (SQLException e) { logger.error("SqlException:", e); }
     }
 
     private String getQuery(String base) {
@@ -639,14 +597,10 @@ public class JdbcSessionRepository implements
 
     private Hydration hydration(ResultSet rs, String id) throws SQLException {
         MapSession delegate = new MapSession(id);
-        int timeout = rs.getInt("MAX_INACTIVE_INTERVAL");
-        Integer storedTimeout = rs.wasNull() ? null : timeout;
-        delegate.setMaxInactiveInterval(storedTimeout == null ? MapSession.DEFAULT_MAX_INACTIVE_INTERVAL_SECONDS : storedTimeout);
+        delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
         delegate.setCreationTime(rs.getLong("CREATION_TIME"));
         delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
-        JdbcSession session = new JdbcSession(delegate);
-        session.storedTimeout = storedTimeout;
-        return new Hydration(session);
+        return new Hydration(new JdbcSession(delegate));
     }
 
     /** Lookup remains a single bounded streaming pass, without disk staging. */
@@ -689,9 +643,6 @@ public class JdbcSessionRepository implements
 
         private final MapSession delegate;
 
-        // Separate from pending in-memory timeout edits until save commits.
-        private Integer storedTimeout;
-
         private boolean isNew;
 
         private boolean changed;
@@ -700,14 +651,12 @@ public class JdbcSessionRepository implements
 
         JdbcSession() {
             this.delegate = new MapSession();
-            this.storedTimeout = delegate.getMaxInactiveInterval();
             this.isNew = true;
         }
 
         JdbcSession(MapSession delegate) {
             Objects.requireNonNull(delegate);
             this.delegate = delegate;
-            this.storedTimeout = delegate.getMaxInactiveInterval();
         }
 
         boolean isNew() {
@@ -723,7 +672,6 @@ public class JdbcSessionRepository implements
         }
 
         void clearChangeFlags() {
-            this.storedTimeout = delegate.getMaxInactiveInterval();
             this.isNew = false;
             this.changed = false;
             this.delta.clear();
@@ -731,7 +679,7 @@ public class JdbcSessionRepository implements
 
 
         public long getExpiryTime() {
-            return expiryTime(getLastAccessedTime(), getMaxInactiveInterval());
+            return getMaxInactiveInterval() < 0 ? Long.MAX_VALUE : getLastAccessedTime() + getMaxInactiveInterval() * 1000L;
         }
 
         @Override
@@ -783,7 +731,7 @@ public class JdbcSessionRepository implements
         public void setLastAccessedTime(long lastAccessedTime) {
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
-            JdbcSessionRepository.this.updateSessionAccess(this);
+            JdbcSessionRepository.this.updateSessionAccess(this.getId(), lastAccessedTime);
         }
 
         @Override

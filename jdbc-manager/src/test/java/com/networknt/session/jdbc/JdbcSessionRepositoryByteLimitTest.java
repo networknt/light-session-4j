@@ -96,7 +96,6 @@ class JdbcSessionRepositoryByteLimitTest {
                     case "next" -> first.getAndSet(false);
                     case "getString" -> "SESSION_ID".equals(args[0]) ? "synthetic-session" : "payload";
                     case "getInt" -> 1800;
-                    case "wasNull" -> false;
                     case "getLong" -> 1L;
                     case "getBinaryStream" -> input;
                     case "getBytes" -> throw new AssertionError("Unbounded getBytes must not be used");
