@@ -163,30 +163,129 @@ class JdbcSessionAggregateLimitTest {
         repo.updateSessionLastAccessTime("missing");
     }
 
+    private int migrateRange(Connection connection, String first, String last) throws Exception {
+        String migration;
+        try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
+            assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertFalse(migration.stripTrailing().endsWith(";"), "JDBC statements must not include the SQL-client delimiter");
+        try (PreparedStatement stmt = connection.prepareStatement(migration)) {
+            stmt.setString(1, first); stmt.setString(2, last); return stmt.executeUpdate();
+        }
+    }
+
     @Test void documentedMigrationRepairsUntouchedLegacyRowsAndIsIdempotent() throws Exception {
-        var repo = repository();
-        int[] timeouts = {1800, 1, -1, Integer.MAX_VALUE, 0};
-        var sessions = new ArrayList<JdbcSessionRepository.JdbcSession>();
-        long oldAccess = System.currentTimeMillis() - 5_000;
-        for (int timeout : timeouts) {
-            var session = repo.createSession(); session.setMaxInactiveInterval(timeout);
-            session.setLastAccessedTime(oldAccess); repo.save(session); sessions.add(session);
-        }
-        try (Connection connection = database.getConnection(); Statement stmt = connection.createStatement()) {
-            stmt.executeUpdate("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL");
-            assertFalse(repo.getSessions().containsKey(sessions.getFirst().getId()));
-            String migration;
-            try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
-                assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        var repo = repository(); long oldAccess = System.currentTimeMillis() - 5_000;
+        var ids = List.of("a-active", "b-expired", "c-null", "d-never", "e-large", "f-zero");
+        Integer[] timeouts = {1800, 1, null, -1, Integer.MAX_VALUE, 0};
+        try (Connection connection = database.getConnection();
+             PreparedStatement insert = connection.prepareStatement("INSERT INTO light_session (SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME) VALUES (?, ?, ?, ?, ?)")) {
+            connection.setAutoCommit(false);
+            for (int i = 0; i < ids.size(); i++) {
+                insert.setString(1, ids.get(i)); insert.setLong(2, oldAccess); insert.setLong(3, oldAccess);
+                if (timeouts[i] == null) { insert.setNull(4, Types.INTEGER); insert.setNull(5, Types.BIGINT); }
+                else { insert.setInt(4, timeouts[i]); insert.setLong(5, oldAccess + timeouts[i]); }
+                insert.executeUpdate();
             }
-            assertEquals(5, stmt.executeUpdate(migration));
-            assertEquals(5, stmt.executeUpdate(migration));
+            connection.commit();
+            assertFalse(repo.getSessions().containsKey("a-active"));
+            assertEquals(2, migrateRange(connection, "a-active", "b-expired"));
+            connection.commit(); // Persisted upper checkpoint: b-expired.
+            assertEquals(0, migrateRange(connection, "a-active", "b-expired"));
+            try (Statement check = connection.createStatement(); ResultSet rows = check.executeQuery("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = 'c-null'")) {
+                assertTrue(rows.next()); assertNull(rows.getObject(1), "The first batch must not touch later IDs");
+            }
+            assertEquals(3, migrateRange(connection, "c-null", "f-zero"));
+            connection.commit();
+            assertEquals(0, migrateRange(connection, "a-active", "f-zero"));
+            // A remaining old node can still undo expiry; the operator must stop it and resweep.
+            try (Statement oldWriter = connection.createStatement()) {
+                oldWriter.executeUpdate("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL WHERE SESSION_ID = 'a-active'");
+            }
+            connection.commit();
+            assertFalse(repo.getSessions().containsKey("a-active"));
+            assertEquals(1, migrateRange(connection, "a-active", "a-active"));
+            connection.commit();
+            assertEquals(0, migrateRange(connection, "a-active", "f-zero"));
+            connection.commit();
         }
-        for (var session : sessions) assertEquals(session.getExpiryTime(), storedExpiry(session.getId()));
+        assertEquals(oldAccess + 1_800_000L, storedExpiry("a-active"));
+        assertEquals(oldAccess + 1_800_000L, storedExpiry("c-null"));
+        assertEquals(1800, repo.findById("c-null").getMaxInactiveInterval());
+        assertEquals(Long.MAX_VALUE, storedExpiry("d-never"));
+        assertEquals(oldAccess + Integer.MAX_VALUE * 1000L, storedExpiry("e-large"));
         repo.cleanUpExpiredSessions();
-        assertEquals(Set.of(sessions.get(0).getId(), sessions.get(2).getId(), sessions.get(3).getId()), repo.getSessions().keySet());
-        assertNotNull(repo.findById(sessions.getFirst().getId()));
-        assertNull(repo.findById(sessions.get(1).getId()));
+        assertEquals(Set.of("a-active", "c-null", "d-never", "e-large"), repo.getSessions().keySet());
+        assertNull(repo.findById("b-expired")); assertNull(repo.findById("f-zero"));
+    }
+
+    @Test void nullTimeoutUsesDefaultForHydrationBothAccessPathsAndMigration() throws Exception {
+        var repo = repository(); repo.setDefaultMaxInactiveInterval(10);
+        var session = repo.createSession();
+        try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement(
+                "UPDATE light_session SET MAX_INACTIVE_INTERVAL = NULL, EXPIRY_TIME = NULL WHERE SESSION_ID = ?")) {
+            stmt.setString(1, session.getId()); stmt.executeUpdate();
+        }
+        var loaded = repo.findById(session.getId()); assertNotNull(loaded);
+        assertEquals(1800, loaded.getMaxInactiveInterval(), "NULL means MapSession default, not new-session configuration");
+        loaded.setMaxInactiveInterval(0); // Pending edit must not override the stored NULL/default policy.
+        long access = System.currentTimeMillis(); loaded.setLastAccessedTime(access);
+        assertEquals(access + 1_800_000L, storedExpiry(session.getId()));
+        assertEquals(1800, repo.findById(session.getId()).getMaxInactiveInterval());
+        repo.updateSessionLastAccessTime(session.getId());
+        var refreshed = repo.findById(session.getId());
+        assertEquals(refreshed.getLastAccessedTime() + 1_800_000L, storedExpiry(session.getId()));
+        try (Connection connection = database.getConnection()) {
+            assertEquals(1, migrateRange(connection, session.getId(), session.getId()));
+            assertEquals(0, migrateRange(connection, session.getId(), session.getId()));
+        }
+        assertTrue(repo.getSessions().containsKey(session.getId()));
+    }
+
+    @Test void accessUsesStoredTimeoutUntilPendingChangeIsSaved() throws Exception {
+        var repo = repository(); var session = repo.createSession();
+        var stale = repo.findById(session.getId());
+        session.setMaxInactiveInterval(60); repo.save(session); // Concurrent writer changes persisted timeout.
+        stale.setMaxInactiveInterval(-1);
+        long access = System.currentTimeMillis(); stale.setLastAccessedTime(access);
+        assertEquals(-1, stale.getMaxInactiveInterval()); assertTrue(stale.isChanged());
+        assertEquals(60, repo.findById(session.getId()).getMaxInactiveInterval());
+        assertEquals(access + 60_000L, storedExpiry(session.getId()));
+        repo.save(stale);
+        assertEquals(-1, repo.findById(session.getId()).getMaxInactiveInterval());
+        assertEquals(Long.MAX_VALUE, storedExpiry(session.getId()));
+    }
+
+    @Test void compatibilityAccessRetriesWhenTimeoutChangesAfterSelect() throws Exception {
+        var writer = repository(); var session = writer.createSession();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource racing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class},
+                (p, m, a) -> {
+                    if (!m.getName().equals("getConnection")) return invoke(database, m, a);
+                    Connection connection = database.getConnection();
+                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                        Object result = invoke(connection, cm, ca);
+                        if (!cm.getName().equals("prepareStatement") || !ca[0].toString().startsWith("SELECT MAX_INACTIVE_INTERVAL")) return result;
+                        PreparedStatement statement = (PreparedStatement) result;
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                            Object value = invoke(statement, sm, sa);
+                            if (!sm.getName().equals("executeQuery")) return value;
+                            ResultSet rows = (ResultSet) value;
+                            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class}, (rp, rm, ra) -> {
+                                Object read = invoke(rows, rm, ra);
+                                if (rm.getName().equals("close") && reads.incrementAndGet() == 1) {
+                                    session.setMaxInactiveInterval(60); writer.save(session);
+                                }
+                                return read;
+                            });
+                        });
+                    });
+                });
+        new JdbcSessionRepository(racing).updateSessionLastAccessTime(session.getId());
+        var refreshed = writer.findById(session.getId());
+        assertEquals(60, refreshed.getMaxInactiveInterval());
+        assertEquals(refreshed.getLastAccessedTime() + 60_000L, storedExpiry(session.getId()));
+        assertEquals(2, reads.get(), "Guarded update must reject the stale timeout and reread");
     }
 
     @Test void writeCountRejectsBeforeSqlAndRetainsPendingChange() {
@@ -259,6 +358,7 @@ class JdbcSessionAggregateLimitTest {
                     case "getString" -> args[0].equals("SESSION_ID") ? "oversized" : "attribute";
                     case "close" -> null;
                     case "getInt" -> 1800;
+                    case "wasNull" -> false;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> stream;
                     default -> throw new UnsupportedOperationException(method.getName());
@@ -532,6 +632,7 @@ class JdbcSessionAggregateLimitTest {
                     case "getString" -> args[0].equals("SESSION_ID") ? (sameSession ? "session" : "session-" + nextCalls.get()) : "attribute-" + nextCalls.get();
                     case "close" -> null;
                     case "getInt" -> 1800;
+                    case "wasNull" -> false;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> new java.io.ByteArrayInputStream(bytes.get(sameSession ? 0 : nextCalls.get() - 1));
                     default -> throw new UnsupportedOperationException(method.getName());
@@ -781,6 +882,7 @@ class JdbcSessionAggregateLimitTest {
                     case "getString" -> args[0].equals("SESSION_ID") ? ids.get(index.get()) : "attribute-" + index.get();
                     case "close" -> null;
                     case "getInt" -> 1800;
+                    case "wasNull" -> false;
                     case "getLong" -> System.currentTimeMillis();
                     case "getBinaryStream" -> new java.io.ByteArrayInputStream(values.get(index.get()));
                     default -> throw new UnsupportedOperationException(method.getName());

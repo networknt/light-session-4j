@@ -162,6 +162,17 @@ class JdbcSessionPostgresBudgetTest {
         });
     }
 
+    private int migrateRange(Connection connection, String first, String last) throws Exception {
+        String migration;
+        try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
+            assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertFalse(migration.stripTrailing().endsWith(";"));
+        try (PreparedStatement stmt = connection.prepareStatement(migration)) {
+            stmt.setString(1, first); stmt.setString(2, last); return stmt.executeUpdate();
+        }
+    }
+
     @Test void expiryMigrationRepairsUntouchedRowsBeforeCleanup() throws Exception {
         withSchema("BYTEA", fixture -> {
             var repo = new JdbcSessionRepository(fixture.source());
@@ -169,19 +180,55 @@ class JdbcSessionPostgresBudgetTest {
             var never = repo.createSession(); never.setMaxInactiveInterval(-1); repo.save(never); never.setLastAccessedTime(1);
             var expired = repo.createSession(); expired.setMaxInactiveInterval(1); repo.save(expired);
             expired.setLastAccessedTime(System.currentTimeMillis() - 5_000);
+            var nullTimeout = repo.createSession();
             try (Statement stmt = fixture.admin().createStatement()) {
                 stmt.executeUpdate("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL");
-                assertFalse(repo.getSessions().containsKey(active.getId()));
-                String migration;
-                try (var stream = getClass().getResourceAsStream("/migrations/fix_session_expiry_milliseconds.sql")) {
-                    assertNotNull(stream); migration = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                }
-                assertEquals(3, stmt.executeUpdate(migration));
-                assertEquals(3, stmt.executeUpdate(migration));
             }
+            try (PreparedStatement stmt = fixture.admin().prepareStatement("UPDATE light_session SET MAX_INACTIVE_INTERVAL = NULL, EXPIRY_TIME = NULL WHERE SESSION_ID = ?")) {
+                stmt.setString(1, nullTimeout.getId()); stmt.executeUpdate();
+            }
+            assertFalse(repo.getSessions().containsKey(active.getId()));
+            var ids = new ArrayList<>(List.of(active.getId(), never.getId(), expired.getId(), nullTimeout.getId()));
+            Collections.sort(ids);
+            assertEquals(1, migrateRange(fixture.admin(), ids.getFirst(), ids.getFirst()));
+            assertEquals(0, migrateRange(fixture.admin(), ids.getFirst(), ids.getFirst()));
+            assertEquals(3, migrateRange(fixture.admin(), ids.get(1), ids.getLast()));
+            assertEquals(0, migrateRange(fixture.admin(), ids.getFirst(), ids.getLast()));
+            try (PreparedStatement oldWriter = fixture.admin().prepareStatement("UPDATE light_session SET EXPIRY_TIME = LAST_ACCESS_TIME + MAX_INACTIVE_INTERVAL WHERE SESSION_ID = ?")) {
+                oldWriter.setString(1, active.getId()); oldWriter.executeUpdate();
+            }
+            assertFalse(repo.getSessions().containsKey(active.getId()));
+            assertEquals(1, migrateRange(fixture.admin(), active.getId(), active.getId()));
+            assertEquals(0, migrateRange(fixture.admin(), ids.getFirst(), ids.getLast()));
+            assertEquals(1800, repo.findById(nullTimeout.getId()).getMaxInactiveInterval());
             repo.cleanUpExpiredSessions();
-            assertEquals(Set.of(active.getId(), never.getId()), repo.getSessions().keySet());
+            assertEquals(Set.of(active.getId(), never.getId(), nullTimeout.getId()), repo.getSessions().keySet());
             assertNotNull(repo.findById(active.getId())); assertNull(repo.findById(expired.getId()));
+        });
+    }
+
+    @Test void storedTimeoutSnapshotGuardsAccessAfterConcurrentSaveAndNullHydration() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var repo = new JdbcSessionRepository(fixture.source()); var session = repo.createSession();
+            var stale = repo.findById(session.getId());
+            session.setMaxInactiveInterval(60); repo.save(session);
+            stale.setMaxInactiveInterval(-1); long access = System.currentTimeMillis(); stale.setLastAccessedTime(access);
+            assertEquals(60, repo.findById(session.getId()).getMaxInactiveInterval());
+            try (PreparedStatement check = fixture.admin().prepareStatement("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = ?")) {
+                check.setString(1, session.getId());
+                try (ResultSet rows = check.executeQuery()) { assertTrue(rows.next()); assertEquals(access + 60_000L, rows.getLong(1)); }
+            }
+            try (PreparedStatement stmt = fixture.admin().prepareStatement("UPDATE light_session SET MAX_INACTIVE_INTERVAL = NULL WHERE SESSION_ID = ?")) {
+                stmt.setString(1, session.getId()); stmt.executeUpdate();
+            }
+            var nullLoaded = repo.findById(session.getId()); assertEquals(1800, nullLoaded.getMaxInactiveInterval());
+            nullLoaded.setMaxInactiveInterval(0); nullLoaded.setLastAccessedTime(access);
+            repo.updateSessionLastAccessTime(session.getId());
+            var refreshed = repo.findById(session.getId()); assertNotNull(refreshed); assertEquals(1800, refreshed.getMaxInactiveInterval());
+            try (PreparedStatement check = fixture.admin().prepareStatement("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = ?")) {
+                check.setString(1, session.getId());
+                try (ResultSet rows = check.executeQuery()) { assertTrue(rows.next()); assertEquals(refreshed.getLastAccessedTime() + 1_800_000L, rows.getLong(1)); }
+            }
         });
     }
 
