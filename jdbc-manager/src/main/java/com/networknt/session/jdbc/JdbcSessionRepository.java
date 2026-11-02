@@ -75,7 +75,7 @@ public class JdbcSessionRepository implements
             "SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
                     "FROM light_session S " +
                     "LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
-                    "WHERE EXPIRY_TIME > ? ORDER BY S.SESSION_ID";
+                    "WHERE EXPIRY_TIME > ?";
 
     private static final String UPDATE_SESSION_QUERY =
             "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
@@ -135,7 +135,13 @@ public class JdbcSessionRepository implements
     private DataSource dataSource;
 
     public JdbcSessionRepository(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    /** Override metadata detection for database proxies, compatible servers, or explicit BLOB storage. */
+    public JdbcSessionRepository(DataSource dataSource, JdbcSessionDialect dialect) {
         this.dataSource = dataSource;
+        this.dialect = dialect;
         prepareQueries();
     }
 
@@ -316,11 +322,11 @@ public class JdbcSessionRepository implements
     /** The parent update holds its row lock until this aggregate check and commit finish. */
     private void validateStoredBudget(Connection connection, String id) throws SQLException {
         JdbcSessionDialect capabilities = dialect(connection);
-        String query = getQuery(capabilities.budgetQuery);
+        String query = capabilities.budgetQuery;
         try (PreparedStatement stmt = connection.prepareStatement(query)) {
             stmt.setString(1, id);
             try (ResultSet rows = stmt.executeQuery()) {
-                if (capabilities.usesBlobLengths()) {
+                if (capabilities.blobLengths) {
                     long count = 0;
                     long bytes = 0;
                     while (rows.next()) {
@@ -349,10 +355,11 @@ public class JdbcSessionRepository implements
     private JdbcSessionDialect dialect(Connection connection) throws SQLException {
         JdbcSessionDialect result = dialect;
         if (result == null) {
-            synchronized (this) {
-                result = dialect;
-                if (result == null) dialect = result = JdbcSessionDialect.forProduct(connection.getMetaData().getDatabaseProductName());
-            }
+            // Concurrent first use may detect the same immutable capabilities more than once.
+            result = JdbcSessionDialect.detect(connection.getMetaData());
+            if (result == JdbcSessionDialect.BLOB)
+                logger.warn("Unrecognized JDBC database; using BLOB locators for session budgets. Select an explicit JdbcSessionDialect to override detection");
+            dialect = result;
         }
         return result;
     }
@@ -494,64 +501,59 @@ public class JdbcSessionRepository implements
         }
     }
 
-    /** Rows must be contiguous by session ID (as in the repository's ORDER BY query). */
+    /** Group arbitrary row order by session ID; only complete valid sessions consume the result budget. */
     public List<JdbcSession> extractData(ResultSet rs) throws SQLException {
         return extractData(rs, true);
     }
 
     List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
-        Set<String> completed = new HashSet<>();
-        List<JdbcSession> sessions = new ArrayList<>();
-        Hydration state = null;
-        String currentId = null;
-        long listingBytes = 0;
+        Map<String, Hydration> states = new LinkedHashMap<>();
+        long stagedBytes = 0;
+        // Bound incomplete/interleaved sessions separately from the final result budget.
+        long stagingLimit = (long) limits.listingBytes + limits.sessionBytes;
         int rows = 0;
         while (rs.next()) {
             if (listing && ++rows > limits.rows) throw new ListingLimitException("rows");
             String id = rs.getString("SESSION_ID");
-            if (state == null || !Objects.equals(currentId, id)) {
-                if (state != null) {
-                    listingBytes = admit(state, sessions, listingBytes, listing);
-                    completed.add(currentId);
-                }
-                if (completed.contains(id)) throw new SQLException("JDBC session rows must be contiguous by session ID");
-                if (listing && completed.size() >= limits.sessions) throw new ListingLimitException("sessions");
+            Hydration state = states.get(id);
+            if (state == null) {
+                if (listing && states.size() >= limits.sessions) throw new ListingLimitException("sessions");
                 MapSession delegate = new MapSession(id);
                 delegate.setMaxInactiveInterval(rs.getInt("MAX_INACTIVE_INTERVAL"));
                 delegate.setCreationTime(rs.getLong("CREATION_TIME"));
                 delegate.setLastAccessedTime(rs.getLong("LAST_ACCESS_TIME"));
                 state = new Hydration(new JdbcSession(delegate));
-                currentId = id;
+                states.put(id, state);
             }
             if (state.session == null) continue;
             String name = rs.getString("ATTRIBUTE_NAME");
             if (name == null) continue;
             if (++state.count > limits.attributes) {
+                stagedBytes -= state.bytes;
                 state.reject(id, "ATTRIBUTE_COUNT");
             } else {
                 try {
                     DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes);
+                    if (listing && stagedBytes + attribute.bytes() > stagingLimit)
+                        throw new ListingLimitException("staging bytes (maxListingBytes + maxSessionBytes)");
+                    stagedBytes += attribute.bytes();
                     state.bytes += attribute.bytes();
                     state.session.delegate.setAttribute(name, attribute.value());
                 } catch (AttributeReadException e) {
+                    stagedBytes -= state.bytes;
                     state.bytes += e.bytesRead;
                     state.reject(id, e.reason.name());
                 } catch (SerializationFailedException e) {
+                    stagedBytes -= state.bytes;
                     state.reject(id, "STREAM_FAILURE");
                 }
             }
             if (!listing && state.session == null) return Collections.emptyList();
         }
-        if (state != null) admit(state, sessions, listingBytes, listing);
+        if (listing && stagedBytes > limits.listingBytes) throw new ListingLimitException("bytes");
+        List<JdbcSession> sessions = new ArrayList<>();
+        for (Hydration state : states.values()) if (state.session != null) sessions.add(state.session);
         return sessions;
-    }
-
-    private long admit(Hydration state, List<JdbcSession> sessions, long bytes, boolean listing) {
-        if (state.session == null) return bytes;
-        long total = bytes + state.bytes;
-        if (listing && total > limits.listingBytes) throw new ListingLimitException("bytes");
-        sessions.add(state.session);
-        return total;
     }
 
 

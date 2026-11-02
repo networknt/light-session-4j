@@ -415,10 +415,22 @@ class JdbcSessionAggregateLimitTest {
         }
     }
 
-    @Test void extractorRejectsInterleavedSessionsExplicitly() throws Exception {
+    @Test void extractorPreservesInterleavedSessionsAndRejectsOnlyThePoisonedSession() throws Exception {
         byte[] value = new ValueBytesConverter().serializer("value");
-        assertThrows(SQLException.class, () -> repository().extractData(
-                listingRows(List.of("one", "two", "one"), List.of(value, value, value))));
+        var sessions = repository().extractData(listingRows(List.of("one", "two", "one"), List.of(value, value, value)));
+        assertEquals(List.of("one", "two"), sessions.stream().map(s -> s.getId()).toList());
+        assertEquals(2, sessions.getFirst().getAttributeNames().size());
+        limit("maxListingBytes", value.length);
+        sessions = repository().extractData(listingRows(List.of("one", "two", "one"), List.of(value, value, new byte[]{1, 2, 3})));
+        assertEquals(List.of("two"), sessions.stream().map(s -> s.getId()).toList());
+    }
+
+    @Test void incompleteSessionStagingHasAnIndependentBound() throws Exception {
+        byte[] value = new ValueBytesConverter().serializer("value");
+        limit("maxSessionBytes", value.length * 2); limit("maxListingBytes", value.length);
+        var failure = assertThrows(IllegalStateException.class, () -> repository().extractData(
+                listingRows(List.of("one", "two", "three", "four"), List.of(value, value, value, value))));
+        assertTrue(failure.getMessage().contains("staging bytes"));
     }
 
     private ResultSet listingRows(List<String> ids, List<byte[]> values) {
