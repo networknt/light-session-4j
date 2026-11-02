@@ -48,7 +48,7 @@ security-sensitive choice.
   persisted. Change flags clear only after a successful commit. A connection-close
   failure after a confirmed commit is logged without misreporting the write as failed.
 - Loads hydrate the underlying MapSession directly, without setAttribute()/save(),
-  reserialization, writes or dirty flags. Rows are grouped by session ID in any
+  reserialization, database writes or dirty flags. Rows are grouped by session ID in any
   order. If an attribute is oversized, corrupt, null or disallowed, its
   entire session is omitted for that load, including previously hydrated attributes.
   Healthy sessions remain available from getSessions(); findById() returns null for
@@ -122,8 +122,9 @@ locking protocol; direct external attribute writes are outside this guarantee.
 Unchanged objects are neither reserialized nor rewritten. Database capabilities are
 cached lazily without holding a repository monitor over metadata I/O; concurrent
 first use may detect the same immutable internal policy more than once. Automatic
-selection uses exact canonical server identities and explicit known aliases, not
-substring matches or the wire-protocol driver name. A DataSource must target one
+selection uses canonical server identities, known aliases, and the structured DB2/
+platform family (including PPC64LE, Z64 and SUN64); AS/400 has an explicit alias.
+Arbitrary substrings and wire-protocol driver names do not select server SQL. A DataSource must target one
 database family. Unknown identities retain the warned BLOB-locator fallback.
 
 For configuration-driven deployments with nonstandard server metadata, set a JVM
@@ -164,32 +165,43 @@ sessions. Listing budgets apply only to getSessions()/extractData(), independent
 per-session budgets; they may deliberately be smaller. findById() uses only
 per-session and per-attribute limits. Lookup caps the JDBC result at maxAttributes + 1
 rows and closes its cursor immediately after rejecting the session.
-The public extractData(ResultSet) helper accepts interleaved session IDs. Listing
-hydration first stages bounded raw attributes, without running object hooks, in an
-extraction-local encrypted temporary file. Once all rows establish the complete
-sessions, it decrypts and decodes one session at a time. Only a fully valid session
-is charged to maxListingBytes. Late count, byte, corrupt-data or filter rejection
-therefore cannot exhaust a prefix-staging RAM ceiling or charge rejected data to
-the final listing, regardless of row order. Values are decoded once and never
-reserialized on this path. Lookup remains a direct streaming pass with no staging
-file. The listing query still has no ORDER BY requirement.
+getSessions() does not stage payloads or use temporary storage. It reads a bounded
+list of live IDs, closes that cursor, then reads and validates each complete session
+through the primary-key lookup. This takes one ID query plus up to maxListingSessions
+session queries; it avoids a global BLOB-row sort and MARS requirements. Row work is
+counted across the session reads, and only fully valid sessions consume the listing
+byte budget. Payload retention is the accepted result plus one bounded candidate.
+Concurrent deletions/updates may be observed between queries: the API does not
+promise a transactionally consistent cross-session snapshot. Query failures discard
+partial results; cleanup-only cursor/connection failures are logged after successful
+reads and do not discard valid data.
 
-This trades temporary-file I/O for bounded Java payload retention: accepted results
-plus one candidate session and per-attribute read/crypto buffers. Ciphertext uses
-AES-GCM with a fresh extraction-only key; each record is authenticated and bound to
-its file offset. No cleartext session data or key material is written to the file.
-Files are created lazily, owner-only on POSIX, opened with DELETE_ON_CLOSE, and
-closed on success or failure. Empty listings do not create a file.
+The public extractData(ResultSet) helper still accepts arbitrary interleaved IDs.
+It buffers raw bytes in memory up to maxListingBytes + maxSessionBytes, releasing
+rejected or decoded buffers promptly. Small calls need no file or crypto provider.
+Only larger unresolved inputs spill to an extraction-local encrypted temp file;
+this preserves the unordered helper contract without a row-order-dependent policy
+refusal. Values are decoded once, one session at a time, and never reserialized.
+Use getSessions() for the built-in disk-free listing path.
 
-The encrypted payload's disk upper bound is maxListingSessions × maxSessionBytes
-plus 28 × maxListingRows bytes of nonce/tag overhead (filesystem allocation overhead
-is separate). Rejected prefixes can remain in that file until close. There is no
-smaller, row-order-dependent staging policy limit. The temporary filesystem must
-have capacity for the configured budgets; java.io.tmpdir selects its location.
-Filesystem/crypto failures fail the entire listing explicitly, without a partial
-successful result. Decoded heap, filesystem cache/tmpfs RAM and JDBC driver buffers
-are not exact serialized-byte quantities. Row and distinct-session ceilings include
-rejected sessions and continue to bound traversal and staging volume.
+A spill uses AES-GCM with a fresh extraction-only key, offset-bound authenticated
+records, and one reusable encrypt/decrypt cipher pair. Each record is initialized
+with its own nonce; provider lookup is per spill, not per record. No cleartext or
+key material is written to the file. Files are owner-only on POSIX and opened with
+DELETE_ON_CLOSE. Workfile close failures are logged after a successful extraction,
+or suppressed on the original failure. There is no shared-temp-directory sweeper
+that might delete another active extraction's file. A failed provider cleanup can
+leave ciphertext for operator/filesystem maintenance; getSessions creates none.
+
+For custom extractor calls that spill, the remaining disk upper bound is
+maxListingSessions × maxSessionBytes plus 28 × maxListingRows bytes of nonce/tag
+overhead. This bound is not the result byte budget. Rejected prefixes can remain
+on disk until close. java.io.tmpdir selects spill storage; unavailable storage or
+actual staging/crypto failure fails that large extraction explicitly. These spill
+risks no longer apply to getSessions() or small buffered helper calls. Decoded heap,
+filesystem cache/tmpfs RAM and driver buffers are not exact serialized-byte sizes.
+The converter's single captured attribute limit governs both raw staging reads and
+deserialization; the repository does not re-read that policy property.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption

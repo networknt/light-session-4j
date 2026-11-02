@@ -42,6 +42,8 @@ enum JdbcSessionDialect {
     static JdbcSessionDialect detect(DatabaseMetaData metadata) throws SQLException {
         String product = metadata.getDatabaseProductName();
         String name = product == null ? "" : product.trim().toLowerCase(Locale.ROOT);
+        // DB2 reports its platform after the canonical DB2/ family prefix.
+        if (name.startsWith("db2/")) return DB2;
         // Server identities select SQL; a wire-protocol driver does not identify the server.
         return switch (name) {
             case "postgresql" -> POSTGRESQL;
@@ -50,7 +52,7 @@ enum JdbcSessionDialect {
             case "h2" -> H2;
             case "mysql" -> MYSQL;
             case "mariadb" -> MARIADB;
-            case "db2", "db2/linuxx8664", "db2/aix64", "db2/nt64" -> DB2;
+            case "db2", "db2 udb for as/400", "db2 udb for iseries", "db2 for i" -> DB2;
             default -> BLOB;
         };
     }

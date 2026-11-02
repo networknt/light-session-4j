@@ -14,18 +14,34 @@ import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 
 /** Extraction-local encrypted raw staging. No decoded objects or key material are persisted. */
-final class JdbcSessionStaging implements AutoCloseable {
-    record Reference(long position, int encryptedBytes) { }
+class JdbcSessionStaging implements AutoCloseable {
+    static final class Reference {
+        private byte[] memory;
+        private long position = -1;
+        private int encryptedBytes;
+        Reference(byte[] memory) { this.memory = memory; }
+        Reference(long position, int encryptedBytes) { this.position = position; this.encryptedBytes = encryptedBytes; }
+        long position() { return position; }
+        int encryptedBytes() { return encryptedBytes; }
+    }
     private final Path directory;
-    private final SecureRandom random = new SecureRandom();
+    private final long memoryLimit;
+    private final java.util.List<Reference> references = new java.util.ArrayList<>();
+    private long memoryBytes;
+    private SecureRandom random;
+    private Cipher encryptCipher;
+    private Cipher decryptCipher;
     private FileChannel channel;
     private SecretKey key;
 
-    JdbcSessionStaging() { this(null); }
-    JdbcSessionStaging(Path directory) { this.directory = directory; }
+    JdbcSessionStaging(long memoryLimit) { this(null, memoryLimit); }
+    JdbcSessionStaging(Path directory, long memoryLimit) { this.directory = directory; this.memoryLimit = memoryLimit; }
 
     private void open() throws IOException, GeneralSecurityException {
         if (channel != null) return;
+        random = new SecureRandom();
+        encryptCipher = Cipher.getInstance("AES/GCM/NoPadding");
+        decryptCipher = Cipher.getInstance("AES/GCM/NoPadding");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(128);
         key = generator.generateKey();
@@ -43,30 +59,54 @@ final class JdbcSessionStaging implements AutoCloseable {
     }
 
     Reference append(byte[] bytes) throws IOException, GeneralSecurityException {
-        open();
+        Reference reference = new Reference(bytes);
+        if (channel == null && memoryBytes + bytes.length <= memoryLimit) {
+            memoryBytes += bytes.length;
+        } else {
+            if (channel == null) {
+                open();
+                for (Reference existing : references) if (existing.memory != null) writeRecord(existing);
+                memoryBytes = 0;
+            }
+            writeRecord(reference);
+        }
+        references.add(reference);
+        return reference;
+    }
+
+    private void writeRecord(Reference reference) throws IOException, GeneralSecurityException {
         byte[] nonce = new byte[12];
         random.nextBytes(nonce);
         long position = channel.size();
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
-        cipher.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(position).array());
-        byte[] encrypted = cipher.doFinal(bytes);
+        encryptCipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
+        encryptCipher.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(position).array());
+        byte[] encrypted = encryptCipher.doFinal(reference.memory);
         channel.position(position);
         write(ByteBuffer.wrap(nonce));
         write(ByteBuffer.wrap(encrypted));
-        return new Reference(position, encrypted.length);
+        reference.position = position;
+        reference.encryptedBytes = encrypted.length;
+        reference.memory = null;
+    }
+
+    void release(Reference reference) {
+        if (reference.memory != null) {
+            memoryBytes -= reference.memory.length;
+            reference.memory = null;
+        }
     }
 
     byte[] read(Reference reference) throws IOException, GeneralSecurityException {
+        if (reference.memory != null) return reference.memory;
+        if (channel == null || reference.position() < 0) throw new IOException("JDBC staging record was released");
         channel.position(reference.position());
         byte[] nonce = new byte[12];
         read(ByteBuffer.wrap(nonce));
         byte[] encrypted = new byte[reference.encryptedBytes()];
         read(ByteBuffer.wrap(encrypted));
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce));
-        cipher.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(reference.position()).array());
-        return cipher.doFinal(encrypted);
+        decryptCipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce));
+        decryptCipher.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(reference.position()).array());
+        return decryptCipher.doFinal(encrypted);
     }
 
     private void write(ByteBuffer bytes) throws IOException {
@@ -79,6 +119,11 @@ final class JdbcSessionStaging implements AutoCloseable {
 
     @Override public void close() throws IOException {
         try { if (channel != null) channel.close(); }
-        finally { key = null; }
+        finally {
+            for (Reference reference : references) reference.memory = null;
+            references.clear();
+            memoryBytes = 0;
+            key = null; encryptCipher = null; decryptCipher = null; random = null;
+        }
     }
 }
