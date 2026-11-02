@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @Isolated
 class JdbcSessionAggregateLimitTest {
     private JdbcDataSource database;
+    @org.junit.jupiter.api.io.TempDir java.nio.file.Path temporaryDirectory;
     private final java.util.concurrent.atomic.AtomicInteger connections = new java.util.concurrent.atomic.AtomicInteger();
     private final Map<String, String> original = new HashMap<>();
     @BeforeEach void setup() throws Exception {
@@ -490,6 +491,163 @@ class JdbcSessionAggregateLimitTest {
         private void writeObject(java.io.ObjectOutputStream stream) throws java.io.IOException {
             writes++; stream.defaultWriteObject();
         }
+    }
+
+    @Test void nativeListingAndSmallExtractionDoNotDependOnTheTempDirectory() throws Exception {
+        java.nio.file.Path unavailable = unavailableDirectory();
+        String previous = System.getProperty("java.io.tmpdir");
+        try {
+            System.setProperty("java.io.tmpdir", unavailable.toString());
+            var repo = new JdbcSessionRepository(database) {
+                @Override JdbcSessionStaging newStaging() { throw new AssertionError("Native listing must not stage payloads"); }
+            };
+            repo.setDefaultMaxInactiveInterval(60_000);
+            var session = repo.createSession(); session.setAttribute("a", "healthy");
+            assertEquals(Set.of(session.getId()), repo.getSessions().keySet());
+            byte[] bytes = new ValueBytesConverter().serializer("healthy");
+            assertEquals(1, repository().extractData(listingRows(List.of("small"), List.of(bytes))).size());
+        } finally { restoreTempDirectory(previous); }
+    }
+
+    @Test void largeUnorderedExtractionReportsAnUnavailableSpillDirectory() throws Exception {
+        String previous = System.getProperty("java.io.tmpdir");
+        byte[] value = new ValueBytesConverter().serializer("value");
+        limit("maxSessionBytes", value.length * 2); limit("maxListingBytes", value.length);
+        try {
+            System.setProperty("java.io.tmpdir", unavailableDirectory().toString());
+            var failure = assertThrows(IllegalStateException.class, () -> repository().extractData(
+                    listingRows(List.of("one", "two", "three", "four"), List.of(value, value, value, value))));
+            assertTrue(failure.getMessage().contains("Unable to stage"));
+            assertInstanceOf(java.io.IOException.class, failure.getCause());
+        } finally { restoreTempDirectory(previous); }
+    }
+
+    @Test void listingLimitDuringRawExtractionClosesSpilledStorage() throws Exception {
+        limit("maxListingRows", 1);
+        boolean[] closed = {false};
+        JdbcSessionStaging staging = new JdbcSessionStaging(temporaryDirectory, 0) {
+            @Override public void close() throws java.io.IOException { try { super.close(); } finally { closed[0] = true; } }
+        };
+        var repo = stagingRepository(staging);
+        byte[] value = new ValueBytesConverter().serializer("value");
+        var failure = assertThrows(IllegalStateException.class, () -> repo.extractData(
+                listingRows(List.of("one", "two"), List.of(value, value))));
+        assertTrue(failure.getMessage().contains("rows")); assertTrue(closed[0]);
+        assertNoStagingFiles();
+    }
+
+    @Test void cleanupOnlyFailurePreservesACompleteListingAndLogsIt() throws Exception {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(JdbcSessionRepository.class);
+        var events = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        events.start(); logger.addAppender(events);
+        try {
+            var repo = stagingRepository(failingCloseStaging());
+            byte[] value = new ValueBytesConverter().serializer("value");
+            assertEquals(1, repo.extractData(listingRows(List.of("one"), List.of(value))).size());
+            assertTrue(events.list.stream().anyMatch(e -> e.getFormattedMessage().contains("staging cleanup failed")));
+        } finally { logger.detachAppender(events); events.stop(); }
+        assertNoStagingFiles();
+    }
+
+    @Test void cleanupFailureDoesNotReplaceThePrimaryListingLimit() throws Exception {
+        limit("maxListingBytes", 1);
+        var repo = stagingRepository(failingCloseStaging());
+        byte[] value = new ValueBytesConverter().serializer("value");
+        var failure = assertThrows(IllegalStateException.class, () -> repo.extractData(listingRows(List.of("one"), List.of(value))));
+        assertTrue(failure.getMessage().contains("limits: bytes"));
+        assertEquals(1, failure.getSuppressed().length);
+        assertInstanceOf(java.io.IOException.class, failure.getSuppressed()[0]);
+        assertNoStagingFiles();
+    }
+
+    @Test void nativeListingKeepsACompleteResultAfterConnectionOrCursorCloseFailure() throws Exception {
+        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        var session = writer.createSession(); session.setAttribute("a", "value");
+        for (boolean cursorFailure : new boolean[]{false, true}) {
+            javax.sql.DataSource failing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (proxy, method, args) -> {
+                        if (!method.getName().equals("getConnection")) return invoke(database, method, args);
+                        Connection connection = database.getConnection();
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (p, m, a) -> {
+                                    if (m.getName().equals("close") && !cursorFailure) { connection.close(); throw new SQLException("synthetic connection close failure"); }
+                                    Object result = invoke(connection, m, a);
+                                    if (m.getName().equals("prepareStatement") && cursorFailure) {
+                                        PreparedStatement statement = (PreparedStatement) result;
+                                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                                (sp, sm, sa) -> {
+                                                    Object value = invoke(statement, sm, sa);
+                                                    if (sm.getName().equals("close")) throw new SQLException("synthetic statement close failure");
+                                                    if (sm.getName().equals("executeQuery")) {
+                                                        ResultSet rows = (ResultSet) value;
+                                                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                                                                (rp, rm, ra) -> {
+                                                                    Object read = invoke(rows, rm, ra);
+                                                                    if (rm.getName().equals("close")) throw new SQLException("synthetic cursor close failure");
+                                                                    return read;
+                                                                });
+                                                    }
+                                                    return value;
+                                                });
+                                    }
+                                    return result;
+                                });
+                    });
+            assertEquals(Set.of(session.getId()), new JdbcSessionRepository(failing).getSessions().keySet());
+        }
+    }
+
+    @Test void nativeListingDiscardsPartialResultsAfterALaterQueryFails() throws Exception {
+        var writer = repository(); writer.setDefaultMaxInactiveInterval(60_000);
+        writer.createSession().setAttribute("a", "one"); writer.createSession().setAttribute("a", "two");
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource failing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (proxy, method, args) -> {
+                    if (!method.getName().equals("getConnection")) return invoke(database, method, args);
+                    Connection connection = database.getConnection();
+                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                            (p, m, a) -> {
+                                Object value = invoke(connection, m, a);
+                                if (m.getName().equals("prepareStatement") && a[0].toString().contains("WHERE S.SESSION_ID = ?")) {
+                                    PreparedStatement statement = (PreparedStatement) value;
+                                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                            (sp, sm, sa) -> {
+                                                if (sm.getName().equals("executeQuery") && reads.incrementAndGet() == 2)
+                                                    throw new SQLException("synthetic later query failure");
+                                                return invoke(statement, sm, sa);
+                                            });
+                                }
+                                return value;
+                            });
+                });
+        assertTrue(new JdbcSessionRepository(failing).getSessions().isEmpty());
+        assertEquals(2, reads.get());
+    }
+
+    private JdbcSessionStaging failingCloseStaging() {
+        return new JdbcSessionStaging(temporaryDirectory, 0) {
+            @Override public void close() throws java.io.IOException { super.close(); throw new java.io.IOException("synthetic close failure"); }
+        };
+    }
+
+    private JdbcSessionRepository stagingRepository(JdbcSessionStaging staging) {
+        return new JdbcSessionRepository(database) {
+            @Override JdbcSessionStaging newStaging() { return staging; }
+        };
+    }
+
+    private java.nio.file.Path unavailableDirectory() throws Exception {
+        java.nio.file.Path path = temporaryDirectory.resolve("not-a-directory");
+        java.nio.file.Files.writeString(path, "marker");
+        return path;
+    }
+
+    private void assertNoStagingFiles() throws Exception {
+        try (var files = java.nio.file.Files.list(temporaryDirectory)) { assertEquals(0, files.count()); }
+    }
+
+    private static void restoreTempDirectory(String previous) {
+        if (previous == null) System.clearProperty("java.io.tmpdir"); else System.setProperty("java.io.tmpdir", previous);
     }
 
     private ResultSet listingRows(List<String> ids, List<byte[]> values) {

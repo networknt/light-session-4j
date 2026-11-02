@@ -100,7 +100,7 @@ class JdbcSessionConnectionCleanupTest {
     }
 
     @Test void mysqlMariaDbAndDb2UseScalarLengthQueries() {
-        for (String product : List.of("MySQL", "MariaDB", "DB2/LINUXX8664")) {
+        for (String product : List.of("MySQL", "MariaDB", "DB2/LINUXX8664", "DB2/LINUXPPC64LE", "DB2/LINUXZ64", "DB2/SUN64", "DB2 UDB for AS/400")) {
             Stub jdbc = new Stub(); jdbc.product = product;
             var repo = jdbc.repository(); repo.save(existing(repo));
             String function = product.startsWith("DB2") ? "SUM(CAST(LENGTH(ATTRIBUTE_BYTES) AS BIGINT))" : "SUM(OCTET_LENGTH(ATTRIBUTE_BYTES))";

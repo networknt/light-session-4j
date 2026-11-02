@@ -72,10 +72,7 @@ public class JdbcSessionRepository implements
                     "WHERE S.SESSION_ID = ?";
 
     private static final String GET_ALL_SESSION_QUERY =
-            "SELECT S.SESSION_ID, S.CREATION_TIME, S.LAST_ACCESS_TIME, S.MAX_INACTIVE_INTERVAL, SA.ATTRIBUTE_NAME, SA.ATTRIBUTE_BYTES " +
-                    "FROM light_session S " +
-                    "LEFT OUTER JOIN light_session_attributes SA ON S.SESSION_ID = SA.SESSION_ID " +
-                    "WHERE EXPIRY_TIME > ?";
+            "SELECT SESSION_ID FROM light_session WHERE EXPIRY_TIME > ?";
 
     private static final String UPDATE_SESSION_QUERY =
             "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
@@ -138,7 +135,7 @@ public class JdbcSessionRepository implements
         this(dataSource, JdbcSessionDialect.configured());
     }
 
-    /** Override metadata detection for database proxies, compatible servers, or explicit BLOB storage. */
+    /** Internal construction seam; deployment overrides use the databaseDialect JVM property. */
     JdbcSessionRepository(DataSource dataSource, JdbcSessionDialect dialect) {
         this.dataSource = dataSource;
         this.dialect = dialect;
@@ -169,23 +166,60 @@ public class JdbcSessionRepository implements
 
     public Map<String, Session> getSessions() {
         Map<String, Session> sessionMap = new HashMap<>();
-        try (final Connection connection = dataSource.getConnection()) {
-
-            PreparedStatement stmt = connection.prepareStatement(this.getAllSessionQuery);
-            stmt.setLong(1, System.currentTimeMillis());
-            ResultSet rs = stmt.executeQuery();
-            List<JdbcSession> sessions = extractData(rs);
-            if (!sessions.isEmpty()) {
-
-                for (JdbcSession session : sessions) {
-                    sessionMap.put(session.getId(), session);
+        boolean complete = false;
+        try (Connection connection = dataSource.getConnection()) {
+            List<String> ids = new ArrayList<>();
+            // Close the ID cursor before issuing another statement (no MARS requirement).
+            boolean idsRead = false;
+            try (PreparedStatement stmt = connection.prepareStatement(getAllSessionQuery)) {
+                stmt.setLong(1, System.currentTimeMillis());
+                stmt.setMaxRows(limits.sessions + 1);
+                try (ResultSet rows = stmt.executeQuery()) {
+                    while (rows.next()) {
+                        if (ids.size() >= limits.sessions) throw new ListingLimitException("sessions");
+                        ids.add(rows.getString("SESSION_ID"));
+                    }
+                    idsRead = true;
+                }
+            } catch (SQLException e) {
+                if (!idsRead) throw e;
+                logger.warn("JDBC listing ID cursor cleanup failed: {}", e.getClass().getSimpleName());
+            }
+            ListingReadBudget budget = new ListingReadBudget();
+            for (String id : ids) {
+                boolean sessionRead = false;
+                try (PreparedStatement stmt = connection.prepareStatement(getSessionQuery)) {
+                    stmt.setString(1, id);
+                    stmt.setMaxRows(limits.attributes + 1);
+                    try (ResultSet rows = stmt.executeQuery()) {
+                        Hydration state = extractSingleSession(rows, budget);
+                        sessionRead = true;
+                        if (state == null) continue;
+                        budget.bytes += state.bytes;
+                        if (budget.bytes > limits.listingBytes) throw new ListingLimitException("bytes");
+                        sessionMap.put(id, state.session);
+                    }
+                } catch (SQLException e) {
+                    if (!sessionRead) throw e;
+                    logger.warn("JDBC listing session cursor cleanup failed: {}", e.getClass().getSimpleName());
                 }
             }
-
+            complete = true;
         } catch (SQLException e) {
-            logger.error("SqlException:", e);
+            if (complete) logger.warn("JDBC listing connection cleanup failed: {}", e.getClass().getSimpleName());
+            else {
+                logger.error("SqlException:", e);
+                // A query failure must not expose a partially assembled successful listing.
+                sessionMap.clear();
+            }
         }
         return sessionMap;
+    }
+
+    private final class ListingReadBudget {
+        int rows;
+        long bytes;
+        void row() { if (++rows > limits.rows) throw new ListingLimitException("rows"); }
     }
 
     @Override
@@ -511,9 +545,14 @@ public class JdbcSessionRepository implements
     }
 
     List<JdbcSession> extractData(ResultSet rs, boolean listing) throws SQLException {
-        if (!listing) return extractSingleSession(rs);
+        if (!listing) {
+            Hydration state = extractSingleSession(rs, null);
+            return state == null ? Collections.emptyList() : Collections.singletonList(state.session);
+        }
         Map<String, Hydration> states = new LinkedHashMap<>();
-        try (JdbcSessionStaging staging = new JdbcSessionStaging()) {
+        JdbcSessionStaging staging = newStaging();
+        Throwable failure = null;
+        try {
             int rows = 0;
             while (rs.next()) {
                 if (++rows > limits.rows) throw new ListingLimitException("rows");
@@ -528,7 +567,7 @@ public class JdbcSessionRepository implements
                 String name = rs.getString("ATTRIBUTE_NAME");
                 if (name == null) continue;
                 if (++state.count > limits.attributes) {
-                    state.reject(id, "ATTRIBUTE_COUNT");
+                    rejectStaged(state, id, "ATTRIBUTE_COUNT", staging);
                     continue;
                 }
                 try {
@@ -537,9 +576,9 @@ public class JdbcSessionRepository implements
                     state.staged.add(new StagedAttribute(name, staging.append(bytes)));
                 } catch (AttributeReadException e) {
                     state.bytes += e.bytesRead;
-                    state.reject(id, e.reason.name());
+                    rejectStaged(state, id, e.reason.name(), staging);
                 } catch (SerializationFailedException e) {
-                    state.reject(id, "STREAM_FAILURE");
+                    rejectStaged(state, id, "STREAM_FAILURE", staging);
                 }
             }
             List<JdbcSession> sessions = new ArrayList<>();
@@ -549,11 +588,13 @@ public class JdbcSessionRepository implements
                 if (state.session == null) continue;
                 try {
                     for (StagedAttribute attribute : state.staged) {
-                        Object value = converter.deserialize(staging.read(attribute.reference()));
-                        state.session.delegate.setAttribute(attribute.name(), value);
+                        try {
+                            Object value = converter.deserialize(staging.read(attribute.reference()));
+                            state.session.delegate.setAttribute(attribute.name(), value);
+                        } finally { staging.release(attribute.reference()); }
                     }
                 } catch (SerializationFailedException e) {
-                    state.reject(entry.getKey(), e instanceof AttributeReadException failure ? failure.reason.name() : "DESERIALIZATION_FAILURE");
+                    rejectStaged(state, entry.getKey(), e instanceof AttributeReadException rejected ? rejected.reason.name() : "DESERIALIZATION_FAILURE", staging);
                     continue;
                 }
                 listingBytes += state.bytes;
@@ -563,8 +604,28 @@ public class JdbcSessionRepository implements
             }
             return sessions;
         } catch (IOException | java.security.GeneralSecurityException e) {
-            throw new IllegalStateException("Unable to stage JDBC session listing", e);
+            IllegalStateException wrapped = new IllegalStateException("Unable to stage JDBC session listing", e);
+            failure = wrapped;
+            throw wrapped;
+        } catch (SQLException | RuntimeException | Error e) {
+            failure = e;
+            throw e;
+        } finally {
+            try { staging.close(); }
+            catch (IOException cleanup) {
+                if (failure != null) failure.addSuppressed(cleanup);
+                else logger.warn("JDBC listing staging cleanup failed: {}", cleanup.getClass().getSimpleName());
+            }
         }
+    }
+
+    JdbcSessionStaging newStaging() {
+        return new JdbcSessionStaging((long) limits.listingBytes + limits.sessionBytes);
+    }
+
+    private void rejectStaged(Hydration state, String id, String reason, JdbcSessionStaging staging) {
+        for (StagedAttribute attribute : state.staged) staging.release(attribute.reference());
+        state.reject(id, reason);
     }
 
     private Hydration hydration(ResultSet rs, String id) throws SQLException {
@@ -576,16 +637,17 @@ public class JdbcSessionRepository implements
     }
 
     /** Lookup remains a single bounded streaming pass, without disk staging. */
-    private List<JdbcSession> extractSingleSession(ResultSet rs) throws SQLException {
+    private Hydration extractSingleSession(ResultSet rs, ListingReadBudget budget) throws SQLException {
         Hydration state = null;
         while (rs.next()) {
+            if (budget != null) budget.row();
             String id = rs.getString("SESSION_ID");
             if (state == null) state = hydration(rs, id);
             String name = rs.getString("ATTRIBUTE_NAME");
             if (name == null) continue;
             if (++state.count > limits.attributes) {
                 state.reject(id, "ATTRIBUTE_COUNT");
-                return Collections.emptyList();
+                return null;
             }
             try {
                 DecodedAttribute attribute = deserialize(rs, limits.sessionBytes - state.bytes);
@@ -594,10 +656,10 @@ public class JdbcSessionRepository implements
             } catch (SerializationFailedException e) {
                 if (e instanceof AttributeReadException failure) state.bytes += failure.bytesRead;
                 state.reject(id, e instanceof AttributeReadException failure ? failure.reason.name() : "STREAM_FAILURE");
-                return Collections.emptyList();
+                return null;
             }
         }
-        return state == null ? Collections.emptyList() : Collections.singletonList(state.session);
+        return state;
     }
 
     /** Raw bytes are bounded before staging; object hooks run once, after session rows are complete. */
@@ -606,9 +668,9 @@ public class JdbcSessionRepository implements
         SerializationFailedException failure = null;
         try {
             if (stream == null) throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, 0, null);
-            int budget = Math.min(limits.attributeBytes, remaining);
+            int budget = Math.min(converter.getMaxSerializedBytes(), remaining);
             byte[] bytes = stream.readNBytes(budget + 1);
-            if (bytes.length > budget) throw new AttributeReadException(limits.attributeBytes <= remaining
+            if (bytes.length > budget) throw new AttributeReadException(converter.getMaxSerializedBytes() <= remaining
                     ? AttributeReadException.Reason.ATTRIBUTE_BYTES : AttributeReadException.Reason.SESSION_BYTES, bytes.length, null);
             return bytes;
         } catch (IOException e) {
