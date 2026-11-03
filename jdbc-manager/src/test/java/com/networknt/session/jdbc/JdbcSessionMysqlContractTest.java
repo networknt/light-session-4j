@@ -95,7 +95,7 @@ class JdbcSessionMysqlContractTest {
             }
             var result = JdbcSessionOrphanCleanupTest.command(java.util.Map.of("JDBC_MAINTENANCE_URL", System.getProperty("jdbcMysqlUrl") + "&useAffectedRows=true"), "--writers-stopped", "2");
             assertEquals(0, result.exit(), result.output());
-            assertEquals(java.util.List.of("Committed orphan attributes: 2", "Committed orphan attributes: 3", "Completed orphan cleanup; removed: 3"), result.output().lines().toList());
+            assertEquals(java.util.List.of("Orphan cleanup page: selected=2, removed=2, totalRemoved=2", "Orphan cleanup page: selected=1, removed=1, totalRemoved=3", "Completed orphan cleanup; removed: 3"), result.output().lines().toList());
             var rerun = JdbcSessionOrphanCleanupTest.command(java.util.Map.of("JDBC_MAINTENANCE_URL", System.getProperty("jdbcMysqlUrl")), "--writers-stopped", "2");
             assertEquals(0, rerun.exit(), rerun.output()); assertTrue(rerun.output().contains("removed: 0"));
             assertEquals("keep", repo.findById(valid.getId()).getAttribute("a"));

@@ -11,7 +11,8 @@ final class JdbcSessionOrphanCleanup {
             + "WHERE NOT EXISTS (SELECT 1 FROM light_session S WHERE S.SESSION_ID = A.SESSION_ID)";
     private static final String DELETE = "DELETE FROM light_session_attributes WHERE SESSION_ID = ? AND ATTRIBUTE_NAME = ? "
             + "AND NOT EXISTS (SELECT 1 FROM light_session S WHERE S.SESSION_ID = light_session_attributes.SESSION_ID)";
-    private static final String AFTER = " AND (A.SESSION_ID > ? OR (A.SESSION_ID = ? AND A.ATTRIBUTE_NAME > ?))";
+    // Give planners a direct leading-key lower bound in addition to the portable composite predicate.
+    private static final String AFTER = " AND A.SESSION_ID >= ? AND (A.SESSION_ID > ? OR (A.SESSION_ID = ? AND A.ATTRIBUTE_NAME > ?))";
     private static final String ORDER = " ORDER BY A.SESSION_ID, A.ATTRIBUTE_NAME";
     record Key(String session, String attribute) { }
     record Page(Key lastKey, int selected, int removed) { }
@@ -39,7 +40,8 @@ final class JdbcSessionOrphanCleanup {
                 if (page.selected() == 0) break;
                 after = page.lastKey();
                 total += page.removed();
-                System.out.println("Committed orphan attributes: " + total);
+                System.out.println("Orphan cleanup page: selected=" + page.selected() + ", removed=" + page.removed()
+                        + ", totalRemoved=" + total);
             }
             System.out.println("Completed orphan cleanup; removed: " + total);
         }
@@ -55,7 +57,7 @@ final class JdbcSessionOrphanCleanup {
                 stmt.setMaxRows(batchSize);
                 if (after != null) {
                     stmt.setString(1, after.session()); stmt.setString(2, after.session());
-                    stmt.setString(3, after.attribute());
+                    stmt.setString(3, after.session()); stmt.setString(4, after.attribute());
                 }
                 try (ResultSet rows = stmt.executeQuery()) {
                     while (rows.next()) {
