@@ -7,7 +7,7 @@ DROP table IF EXISTS light_session_attributes;
     creation_time bigint NOT NULL,
     last_access_time bigint NOT NULL,
     max_inactive_interval int,
-    expiry_time bigint,
+    expiry_time bigint, -- reserved legacy column; repository writes NULL
     principal_name VARCHAR(100),
     PRIMARY KEY(session_id)
   );

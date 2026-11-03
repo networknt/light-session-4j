@@ -76,7 +76,12 @@ public class JdbcSessionManager implements SessionManager {
 		}
 		Session session = sessionRepository.findById(sessionId);
 		if (session!=null && !session.isExpired()) {
-			session.setLastAccessedTime(System.currentTimeMillis());
+            try {
+                session.setLastAccessedTime(System.currentTimeMillis());
+            } catch (JdbcSessionException e) {
+                if (e.getReason() == JdbcSessionException.Reason.UNAVAILABLE) return null;
+                throw e;
+            }
 
 			return session;
 		}
