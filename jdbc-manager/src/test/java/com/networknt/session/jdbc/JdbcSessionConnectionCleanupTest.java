@@ -254,7 +254,12 @@ class JdbcSessionConnectionCleanupTest {
                     if (writeFailure) throw writeError;
                     yield query.startsWith("UPDATE light_session_attributes") ? 0 : 1;
                 }
-                case "executeQuery" -> rows();
+                case "executeQuery" -> query.startsWith("SELECT 1 FROM light_session_attributes")
+                        ? proxy(ResultSet.class, (m, a) -> switch (m) {
+                            case "next" -> false; // This fixture's attribute UPDATE models an absent attribute.
+                            case "close" -> null;
+                            default -> throw new AssertionError(m);
+                        }) : rows();
                 default -> throw new AssertionError(method);
             });
         }

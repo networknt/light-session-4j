@@ -380,6 +380,118 @@ class JdbcSessionAggregateLimitTest {
         }
     }
 
+    @FunctionalInterface
+    private interface UpdateResult { int execute(PreparedStatement statement) throws SQLException; }
+
+    private javax.sql.DataSource interceptUpdates(java.util.function.Predicate<String> matches, UpdateResult outcome) {
+        return (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (p, m, a) -> {
+            if (!m.getName().equals("getConnection")) return invoke(database, m, a);
+            Connection connection = database.getConnection();
+            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                Object value = invoke(connection, cm, ca);
+                if (!cm.getName().equals("prepareStatement") || !matches.test(ca[0].toString())) return value;
+                PreparedStatement statement = (PreparedStatement) value;
+                return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                    if (sm.getName().equals("executeUpdate")) return outcome.execute(statement);
+                    return invoke(statement, sm, sa);
+                });
+            });
+        });
+    }
+
+    private JdbcSessionManager manager(JdbcSessionRepository repo, String id, java.util.concurrent.atomic.AtomicInteger clears) {
+        var config = (io.undertow.server.session.SessionConfig) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{io.undertow.server.session.SessionConfig.class},
+                (p, m, a) -> switch (m.getName()) {
+                    case "findSessionId" -> id;
+                    case "clearSession" -> { clears.incrementAndGet(); yield null; }
+                    default -> null;
+                });
+        return new JdbcSessionManager(config, repo);
+    }
+
+    @Test void managerTreatsDeletedOrExpiredBetweenLookupAndRefreshAsNoSession() throws Exception {
+        for (boolean deleted : new boolean[]{false, true}) {
+            var initial = repository().createSession();
+            var captured = new java.util.concurrent.atomic.AtomicReference<JdbcSessionRepository.JdbcSession>();
+            var raced = new JdbcSessionRepository(database) {
+                @Override public JdbcSession findById(String id) {
+                    JdbcSession session = super.findById(id); captured.set(session);
+                    try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement(deleted
+                            ? "DELETE FROM light_session WHERE SESSION_ID = ?"
+                            : "UPDATE light_session SET MAX_INACTIVE_INTERVAL = 0 WHERE SESSION_ID = ?")) {
+                        stmt.setString(1, id); stmt.executeUpdate();
+                    } catch (SQLException e) { throw new AssertionError(e); }
+                    return session;
+                }
+            };
+            var clears = new java.util.concurrent.atomic.AtomicInteger();
+            assertNull(manager(raced, initial.getId(), clears).getSession((io.undertow.server.HttpServerExchange) null));
+            assertEquals(1, clears.get(), "Unavailable lookup must follow the manager's existing cookie-clear path");
+            assertEquals(initial.getLastAccessedTime(), captured.get().getLastAccessedTime());
+            assertFalse(captured.get().isChanged());
+        }
+    }
+
+    @Test void unchangedUpdatesWithAffectedRowCountsAreSuccessful() throws Exception {
+        var writer = repository(); var initial = writer.createSession();
+        var reportsChangedRows = interceptUpdates(q -> q.startsWith("UPDATE light_session"), stmt -> { stmt.executeUpdate(); return 0; });
+        var repo = new JdbcSessionRepository(reportsChangedRows); var loaded = repo.findById(initial.getId());
+        assertDoesNotThrow(() -> loaded.setLastAccessedTime(loaded.getLastAccessedTime()));
+        assertDoesNotThrow(() -> repo.save(loaded)); assertFalse(loaded.isChanged());
+        assertDoesNotThrow(() -> loaded.setAttribute("idempotent", "same"));
+        assertDoesNotThrow(() -> loaded.setAttribute("idempotent", "same"));
+        assertEquals(1, rowCount("light_session_attributes", loaded.getId()));
+        assertNotNull(repo.findById(initial.getId()));
+        writer.deleteById(initial.getId());
+        var missing = assertThrows(JdbcSessionException.class, () -> repo.updateSessionLastAccessTime(initial.getId()));
+        assertEquals(JdbcSessionException.Reason.UNAVAILABLE, missing.getReason());
+    }
+
+    @Test void managerAndSaveDistinguishUnavailableFromStorageFailures() throws Exception {
+        var initial = repository().createSession();
+        var failing = interceptUpdates(q -> q.startsWith("UPDATE light_session SET"), stmt -> { throw new SQLException("synthetic storage outage"); });
+        var repo = new JdbcSessionRepository(failing); var loaded = repo.findById(initial.getId());
+        var managerFailure = assertThrows(JdbcSessionException.class, () -> manager(repo, initial.getId(), new java.util.concurrent.atomic.AtomicInteger()).getSession(initial.getId()));
+        assertEquals(JdbcSessionException.Reason.STORAGE_FAILURE, managerFailure.getReason());
+        assertInstanceOf(SQLException.class, managerFailure.getCause());
+        assertEquals(initial.getLastAccessedTime(), loaded.getLastAccessedTime()); assertFalse(loaded.isChanged());
+        var saveFailure = assertThrows(JdbcSessionException.class, () -> repo.save(loaded));
+        assertEquals(JdbcSessionException.Reason.STORAGE_FAILURE, saveFailure.getReason());
+        repository().deleteById(initial.getId());
+        var refused = assertThrows(JdbcSessionException.class, () -> repository().save(loaded));
+        assertEquals(JdbcSessionException.Reason.UNAVAILABLE, refused.getReason());
+    }
+
+    @Test void configuredCleanupBatchSizeAvoidsFinalEmptyProbeAtExactBoundary() throws Exception {
+        limit("cleanupBatchSize", 2);
+        try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement("INSERT INTO light_session (SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL) VALUES (?, 1, 1, 0)")) {
+            for (int i = 0; i < 4; i++) { stmt.setString(1, "expired-" + i); stmt.executeUpdate(); }
+        }
+        var selects = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource traced = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (p, m, a) -> {
+            if (!m.getName().equals("getConnection")) return invoke(database, m, a);
+            Connection connection = database.getConnection();
+            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                if (cm.getName().equals("prepareStatement") && ca[0].toString().startsWith("SELECT SESSION_ID FROM light_session")) selects.incrementAndGet();
+                return invoke(connection, cm, ca);
+            });
+        });
+        new JdbcSessionRepository(traced).cleanUpExpiredSessions();
+        assertEquals(2, selects.get(), "Two exact pages must not require a third empty query");
+        assertTrue(repository().getSessions().isEmpty());
+    }
+
+    @Test void shippedOfflineMaintenanceDeletesOnlyHistoricalOrphans() throws Exception {
+        var repo = repository(); var healthy = repo.createSession(); healthy.setAttribute("a", "keep");
+        attribute("historical-orphan", "a", "remove offline");
+        try (Connection connection = database.getConnection(); Statement stmt = connection.createStatement()) {
+            assertEquals(1, stmt.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
+            assertEquals(0, stmt.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
+        }
+        assertEquals(1, rowCount("light_session_attributes", healthy.getId()));
+        assertEquals(0, rowCount("light_session_attributes", "historical-orphan"));
+    }
+
     @Test void writeCountRejectsBeforeSqlAndRetainsPendingChange() {
         limit("maxAttributes", 2);
         var repo = repository(); var session = repo.createSession();

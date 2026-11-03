@@ -110,6 +110,7 @@ integer system properties captured when a repository is constructed:
 | maxListingBytes | 67108864 serialized bytes per result |
 | maxListingSessions | 1000 distinct session IDs, including rejected sessions |
 | maxListingRows | 65000 JDBC result rows |
+| cleanupBatchSize | 128 expired session IDs per transaction |
 
 Existing per-attribute byte and object-graph/class restrictions still apply.
 Save serializes only pending values before acquiring a connection. Obvious pending
@@ -146,8 +147,8 @@ BIGINT *before* SUM to prevent INTEGER aggregate overflow. Each optimized check
 returns one count/byte-total row under the parent lock. Empty new sessions and saves
 without attribute changes skip validation. The blob override selects Blob.length()/
 Blob.free() locator validation; materialization remains driver-dependent. PostgreSQL
-BYTEA uses binary-stream binding; other policies retain setBlob. Non-H2/PostgreSQL
-SQL and binding behavior has scripted coverage only, not live-driver qualification.
+BYTEA uses binary-stream binding; other policies retain setBlob. CI contracts exercise H2/PostgreSQL; other deployment SQL and binding behavior
+still require driver qualification.
 
 Only saves that need stored validation inspect isolation and temporarily select
 READ_COMMITTED if necessary. The original isolation is restored only when changed.
@@ -209,13 +210,22 @@ Access updates LAST_ACCESS_TIME only while the stored row is still live, using t
 same predicate and the wall-clock time of the update attempt. Both the public ID-only
 method and a late setLastAccessedTime cannot revive an already expired row; a future
 requested access timestamp or pending timeout change does not bypass that check.
-A refused refresh throws IllegalStateException. setLastAccessedTime applies the new
+A refused refresh throws JdbcSessionException with Reason.UNAVAILABLE. The manager
+handles that reason as no session and follows its existing cookie-clear path. SQL
+failures use Reason.STORAGE_FAILURE with the SQLException cause, so outages are not
+silently treated as logout. Refused saves use the same UNAVAILABLE reason; save SQL
+failures use STORAGE_FAILURE. setLastAccessedTime applies the new
 in-memory timestamp and dirty flag only after that UPDATE succeeds; existing pending
 edits are preserved on refusal. save() also requires the stored row to be live, so a
 stale object or later setAttribute cannot resurrect an expired session. SQL save
 failures retain pending edits. Pending timeout edits affect stored liveness only when
 a save of a still-live row commits. There is one UPDATE per access, with no timeout
-snapshot, lookup or retry loop.
+snapshot or retry loop. If a driver reports zero changed rows for an unchanged
+UPDATE, one bounded read verifies the requested live state before treating it as a
+refusal. The same verification handles unchanged saves in affected-row count mode. Attribute
+upserts with a zero update count check the keyed attribute's existence under the
+parent lock, so repeating an identical value does not attempt a duplicate INSERT.
+See [Connector/J affected-row settings](https://dev.mysql.com/doc/connector-j/en/connector-j-connp-props-connection.html).
 
 EXPIRY_TIME is a reserved legacy column. New sessions, full saves and successful
 access updates explicitly write NULL, rather than a plausible but stale timestamp.
@@ -227,11 +237,15 @@ required by the corrected repository.
 
 Save and deletion share one transaction handler for commit, rollback/abort and
 borrowed-connection restoration. Delete-by-ID removes a parent and its attributes in
-one transaction. Expiry cleanup selects primary-key ID pages of at most 128 candidates,
+one transaction. Expiry cleanup selects primary-key ID pages controlled by
+light.session.jdbc.serialization.cleanupBatchSize (default 128, captured at repository
+construction),
 rechecks expiry on each conditional parent DELETE, and deletes attributes only for IDs
 whose parent it actually deleted in that transaction. It commits each page; a failed
 page rolls back while earlier committed pages remain complete. A later cleanup call
-can retry remaining rows. Selection cursors close before deletes, with no MARS need.
+can retry remaining rows. One extra ID provides lookahead, so even an exact final
+page does not require an empty probe. At most cleanupBatchSize parents are processed
+per transaction. Selection cursors close before deletes, with no MARS need.
 
 Cleanup does no attribute work for an empty page and performs only keyed child deletes
 for successful parent deletes. It issues no table-wide attribute sweep or orphan
@@ -270,10 +284,24 @@ SELECT COUNT(*) FROM light_session_attributes A
 WHERE NOT EXISTS (SELECT 1 FROM light_session S WHERE S.SESSION_ID = A.SESSION_ID);
 ```
 
+### Explicit historical-orphan maintenance
+
+A runnable SQL-client script ships at
+[maintenance/delete_orphan_session_attributes.sql](src/main/resources/maintenance/delete_orphan_session_attributes.sql).
+It has no bind parameters and is never run by startup or routine cleanup. Stop all
+session writers and cleanup, take the inventory/backup required by the deployment,
+then run the file in psql, SQL*Plus, sqlcmd or the deployment's SQL client. Commit
+according to that client's transaction settings, confirm the orphan count is zero,
+and resume writers. The maintenance window is required because this explicit global
+anti-join is not safe to infer against concurrent parent inserts. It removes only
+rows without parents and leaves valid session attributes intact. No operator-written
+JDBC loop or new schema is required. The script is exercised in disposable H2 and
+PostgreSQL fixtures; other deployment drivers remain owner-qualified.
+
 The computed predicate may scan session metadata and cannot rely on an index on
 EXPIRY_TIME. It avoids reading attribute payloads during ID selection; result limits
 do not claim to bound database scan work. H2 and PostgreSQL exercise the predicate;
-other vendor drivers retain scripted-only qualification.
+other deployment drivers require their own qualification.
 
 A listing that exceeds a listing budget throws IllegalStateException;
 it does not masquerade as an empty or partial successful result. Stream consumption

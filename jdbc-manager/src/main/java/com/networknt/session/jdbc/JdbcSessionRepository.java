@@ -88,10 +88,20 @@ public class JdbcSessionRepository implements
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
             "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = NULL WHERE SESSION_ID = ? AND " + LIVE_SESSION_PREDICATE;
 
+    private static final String VERIFY_ACCESS_QUERY =
+            "SELECT 1 FROM light_session WHERE SESSION_ID = ? AND LAST_ACCESS_TIME = ? AND EXPIRY_TIME IS NULL AND " + LIVE_SESSION_PREDICATE;
+
+    private static final String VERIFY_SAVE_QUERY =
+            "SELECT 1 FROM light_session WHERE SESSION_ID = ? AND LAST_ACCESS_TIME = ? AND MAX_INACTIVE_INTERVAL = ? " +
+                    "AND PRINCIPAL_NAME = ? AND EXPIRY_TIME IS NULL AND " + LIVE_SESSION_PREDICATE;
+
     private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
             "UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
                     "WHERE SESSION_ID = ? " +
                     "AND ATTRIBUTE_NAME = ?";
+
+    private static final String ATTRIBUTE_EXISTS_QUERY =
+            "SELECT 1 FROM light_session_attributes WHERE SESSION_ID = ? AND ATTRIBUTE_NAME = ?";
 
     private static final String DELETE_SINGLE_ATTRIBUTE_QUERY =
             "DELETE FROM light_session_attributes " +
@@ -107,8 +117,6 @@ public class JdbcSessionRepository implements
                     "FROM light_session S " +
                     "LEFT OUTER JOIN light_session_attributes SA ON S.PRIMARY_ID = SA.SESSION_PRIMARY_ID " +
                     "WHERE S.PRINCIPAL_NAME = ?";
-
-    private static final int CLEANUP_BATCH_SIZE = 128;
 
     private static final String SELECT_EXPIRED_IDS_QUERY =
             "SELECT SESSION_ID FROM light_session WHERE NOT " + LIVE_SESSION_PREDICATE + " ORDER BY SESSION_ID";
@@ -310,7 +318,8 @@ public class JdbcSessionRepository implements
             });
             session.clearChangeFlags();
         } catch (SQLException e) {
-            throw new IllegalStateException("Failed to persist JDBC session; pending changes retained", e);
+            throw new JdbcSessionException(JdbcSessionException.Reason.STORAGE_FAILURE,
+                    "Failed to persist JDBC session; pending changes retained", e);
         }
     }
 
@@ -378,7 +387,10 @@ public class JdbcSessionRepository implements
                 stmt.setString(5, session.getId());
                 stmt.setLong(6, System.currentTimeMillis());
             }
-            if (stmt.executeUpdate() != 1) throw new SQLException("JDBC session row is expired or missing; pending changes retained");
+            int written = stmt.executeUpdate();
+            if (written != 1 && (isNew || !savedStateMatches(connection, session)))
+                throw new JdbcSessionException(JdbcSessionException.Reason.UNAVAILABLE,
+                        "JDBC session is expired or missing; pending changes retained", null);
         }
         for (Map.Entry<String, byte[]> entry : attributes.entrySet()) {
             String name = entry.getKey();
@@ -396,8 +408,26 @@ public class JdbcSessionRepository implements
                     stmt.setString(2, session.getId()); stmt.setString(3, name);
                     count = stmt.executeUpdate();
                 }
-                if (count == 0) insertAttribute(connection, session.getId(), name, bytes);
+                if (count == 0 && !attributeExists(connection, session.getId(), name))
+                    insertAttribute(connection, session.getId(), name, bytes);
             }
+        }
+    }
+
+    private boolean attributeExists(Connection connection, String id, String name) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(ATTRIBUTE_EXISTS_QUERY)) {
+            stmt.setString(1, id); stmt.setString(2, name);
+            try (ResultSet rows = stmt.executeQuery()) { return rows.next(); }
+        }
+    }
+
+    /** Affected-row drivers may report zero for an unchanged, successfully matched UPDATE. */
+    private boolean savedStateMatches(Connection connection, JdbcSession session) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(VERIFY_SAVE_QUERY)) {
+            stmt.setString(1, session.getId()); stmt.setLong(2, session.getLastAccessedTime());
+            stmt.setInt(3, session.getMaxInactiveInterval()); stmt.setString(4, session.getPrincipalName());
+            stmt.setLong(5, System.currentTimeMillis());
+            try (ResultSet rows = stmt.executeQuery()) { return rows.next(); }
         }
     }
 
@@ -531,7 +561,7 @@ public class JdbcSessionRepository implements
         List<String> ids = readResource(connection.prepareStatement(after == null ? selectExpiredIdsQuery : selectExpiredIdsAfterQuery), stmt -> {
             int parameter = 1;
             if (after != null) stmt.setString(parameter++, after);
-            stmt.setLong(parameter, cutoff); stmt.setMaxRows(CLEANUP_BATCH_SIZE);
+            stmt.setLong(parameter, cutoff); stmt.setMaxRows(limits.cleanupBatchSize + 1);
             return readResource(stmt.executeQuery(), rows -> {
                 List<String> selected = new ArrayList<>();
                 while (rows.next()) selected.add(rows.getString("SESSION_ID"));
@@ -543,13 +573,13 @@ public class JdbcSessionRepository implements
         // Only successful parent deletes authorize a keyed child delete in this transaction.
         try (PreparedStatement parent = connection.prepareStatement(deleteExpiredParentQuery);
              PreparedStatement attributes = connection.prepareStatement(deleteAttributesForSessionQuery)) {
-            for (String id : ids) {
+            for (String id : ids.subList(0, Math.min(ids.size(), limits.cleanupBatchSize))) {
                 parent.setString(1, id); parent.setLong(2, cutoff);
                 if (parent.executeUpdate() != 1) continue;
                 attributes.setString(1, id); attributes.executeUpdate(); deleted++;
             }
         }
-        return new CleanupPage(ids.getLast(), deleted);
+        return new CleanupPage(ids.size() > limits.cleanupBatchSize ? ids.get(limits.cleanupBatchSize - 1) : null, deleted);
     }
 
     public void updateSessionLastAccessTime(final String id) {
@@ -562,12 +592,22 @@ public class JdbcSessionRepository implements
                     readResource(connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY), stmt -> {
                         stmt.setLong(1, lastAccessedTime); stmt.setString(2, id);
                         stmt.setLong(3, System.currentTimeMillis());
-                        if (stmt.executeUpdate() != 1)
-                            throw new IllegalStateException("JDBC session access refused: stored session is expired or missing");
+                        int updated = stmt.executeUpdate();
+                        if (updated != 1 && !accessStateMatches(connection, id, lastAccessedTime))
+                            throw new JdbcSessionException(JdbcSessionException.Reason.UNAVAILABLE,
+                                    "JDBC session access refused: stored session is expired or missing", null);
                         return null;
                     }, "access statement"), "access connection");
         } catch (SQLException e) {
-            throw new IllegalStateException("Failed to refresh JDBC session; in-memory access time unchanged", e);
+            throw new JdbcSessionException(JdbcSessionException.Reason.STORAGE_FAILURE,
+                    "Failed to refresh JDBC session; in-memory access time unchanged", e);
+        }
+    }
+
+    private boolean accessStateMatches(Connection connection, String id, long accessTime) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(VERIFY_ACCESS_QUERY)) {
+            stmt.setString(1, id); stmt.setLong(2, accessTime); stmt.setLong(3, System.currentTimeMillis());
+            try (ResultSet rows = stmt.executeQuery()) { return rows.next(); }
         }
     }
 
