@@ -106,8 +106,8 @@
         <version.snakeyaml>2.7</version.snakeyaml>
         <version.redisson>4.8.0</version.redisson>
         <version.hikaricp>7.1.0</version.hikaricp>
-        <version.mysql-connector-j>26.10.0</version.mysql-connector-j>
-        <version.postgresql>42.7.5</version.postgresql>
+        <version.mysql>26.10.0</version.mysql>
+        <version.postgres>42.7.14</version.postgres>
         <version.h2>2.5.252</version.h2>
         <version.httpclient>4.5.14</version.httpclient>
         <version.caffeine>3.3.1</version.caffeine>
