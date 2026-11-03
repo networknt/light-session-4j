@@ -26,7 +26,8 @@ class JdbcSessionAggregateLimitTest {
         try (Connection c = database.getConnection(); Statement stmt = c.createStatement()) { stmt.execute("SHUTDOWN"); }
     }
     private void limit(String key, int value) {
-        key = com.networknt.session.jdbc.serializer.SerializedAttributeLimits.PREFIX + key;
+        key = key.equals("cleanupBatchSize") ? "light.session.jdbc.cleanupBatchSize"
+                : com.networknt.session.jdbc.serializer.SerializedAttributeLimits.PREFIX + key;
         if (!original.containsKey(key)) original.put(key, System.getProperty(key));
         System.setProperty(key, Integer.toString(value));
     }
@@ -435,7 +436,7 @@ class JdbcSessionAggregateLimitTest {
     @Test void unchangedUpdatesWithAffectedRowCountsAreSuccessful() throws Exception {
         var writer = repository(); var initial = writer.createSession();
         var reportsChangedRows = interceptUpdates(q -> q.startsWith("UPDATE light_session"), stmt -> { stmt.executeUpdate(); return 0; });
-        var repo = new JdbcSessionRepository(reportsChangedRows); var loaded = repo.findById(initial.getId());
+        var repo = new JdbcSessionRepository(reportsChangedRows, JdbcSessionDialect.MYSQL); var loaded = repo.findById(initial.getId());
         assertDoesNotThrow(() -> loaded.setLastAccessedTime(loaded.getLastAccessedTime()));
         assertDoesNotThrow(() -> repo.save(loaded)); assertFalse(loaded.isChanged());
         assertDoesNotThrow(() -> loaded.setAttribute("idempotent", "same"));
@@ -445,6 +446,23 @@ class JdbcSessionAggregateLimitTest {
         writer.deleteById(initial.getId());
         var missing = assertThrows(JdbcSessionException.class, () -> repo.updateSessionLastAccessTime(initial.getId()));
         assertEquals(JdbcSessionException.Reason.UNAVAILABLE, missing.getReason());
+    }
+
+    @Test void matchedRowDriverAddsAttributesWithoutExistenceQuery() throws Exception {
+        var selects = new java.util.concurrent.atomic.AtomicInteger();
+        var traced = interceptUpdates(q -> false, stmt -> stmt.executeUpdate());
+        javax.sql.DataSource source = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class}, (p, m, a) -> {
+            if (!m.getName().equals("getConnection")) return invoke(traced, m, a);
+            Connection connection = traced.getConnection();
+            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                if (cm.getName().equals("prepareStatement") && ca[0].toString().startsWith("SELECT 1 FROM light_session_attributes")) selects.incrementAndGet();
+                return invoke(connection, cm, ca);
+            });
+        });
+        var repo = new JdbcSessionRepository(source); var session = repo.createSession();
+        session.setAttribute("new", "value"); session.setAttribute("new", "value");
+        assertEquals(0, selects.get());
+        assertEquals("value", repo.findById(session.getId()).getAttribute("new"));
     }
 
     @Test void managerAndSaveDistinguishUnavailableFromStorageFailures() throws Exception {
@@ -481,12 +499,46 @@ class JdbcSessionAggregateLimitTest {
         assertTrue(repository().getSessions().isEmpty());
     }
 
+    @Test void cleanupPropertyUsesJdbcNamespaceAndRejectsInvalidValues() {
+        limit("cleanupBatchSize", 3);
+        assertEquals(3, new JdbcSessionLimits().cleanupBatchSize);
+        limit("cleanupBatchSize", 0);
+        var failure = assertThrows(IllegalArgumentException.class, JdbcSessionLimits::new);
+        assertTrue(failure.getMessage().startsWith("light.session.jdbc.cleanupBatchSize "));
+    }
+
+    @Test void offlineMaintenanceRollsBackFailedPage() throws Exception {
+        attribute("rollback-orphan", "a", "one"); attribute("rollback-orphan", "b", "two");
+        var deletes = new java.util.concurrent.atomic.AtomicInteger();
+        var failing = interceptUpdates(q -> q.startsWith("DELETE FROM light_session_attributes"), stmt -> {
+            if (deletes.incrementAndGet() == 2) throw new SQLException("maintenance page failure");
+            return stmt.executeUpdate();
+        });
+        try (Connection connection = failing.getConnection()) {
+            connection.setAutoCommit(false);
+            assertThrows(SQLException.class, () -> JdbcSessionOrphanCleanup.removePage(connection, 2));
+        }
+        assertEquals(2, rowCount("light_session_attributes", "rollback-orphan"));
+        try (Connection connection = database.getConnection()) {
+            connection.setAutoCommit(false);
+            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2));
+        }
+    }
+
     @Test void shippedOfflineMaintenanceDeletesOnlyHistoricalOrphans() throws Exception {
         var repo = repository(); var healthy = repo.createSession(); healthy.setAttribute("a", "keep");
         attribute("historical-orphan", "a", "remove offline");
-        try (Connection connection = database.getConnection(); Statement stmt = connection.createStatement()) {
-            assertEquals(1, stmt.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
-            assertEquals(0, stmt.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
+        attribute("historical-orphan", "b", "second");
+        attribute("another-orphan", "a", "third");
+        try (Connection connection = database.getConnection()) {
+            connection.setAutoCommit(false);
+            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2));
+        }
+        // A fresh connection resumes from committed deletions, without a checkpoint file.
+        try (Connection connection = database.getConnection()) {
+            connection.setAutoCommit(false);
+            assertEquals(1, JdbcSessionOrphanCleanup.removePage(connection, 2));
+            assertEquals(0, JdbcSessionOrphanCleanup.removePage(connection, 2));
         }
         assertEquals(1, rowCount("light_session_attributes", healthy.getId()));
         assertEquals(0, rowCount("light_session_attributes", "historical-orphan"));

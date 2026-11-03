@@ -13,7 +13,11 @@ public final class SerializedAttributeLimits {
     }
 
     public static int configuredPositive(String name, int fallback) {
-        String key = PREFIX + name;
+        return configuredPositiveProperty(PREFIX + name, fallback);
+    }
+
+    /** Parse a fully qualified property using the same positive-integer policy. */
+    public static int configuredPositiveProperty(String key, int fallback) {
         String value = System.getProperty(key);
         if (value == null) return fallback;
         try {

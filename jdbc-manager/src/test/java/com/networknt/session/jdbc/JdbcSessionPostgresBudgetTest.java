@@ -337,10 +337,10 @@ class JdbcSessionPostgresBudgetTest {
             try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
                 assertTrue(rows.next()); assertEquals(2, rows.getInt(1), "New session and historical orphan must both remain");
             }
-            try (Statement maintenance = fixture.admin().createStatement()) {
-                assertEquals(1, maintenance.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
-                assertEquals(0, maintenance.executeUpdate(JdbcMaintenanceTestSupport.orphanCleanupSql()));
-            }
+            fixture.admin().setAutoCommit(false);
+            assertEquals(1, JdbcSessionOrphanCleanup.removePage(fixture.admin(), 1));
+            assertEquals(0, JdbcSessionOrphanCleanup.removePage(fixture.admin(), 1));
+            fixture.admin().setAutoCommit(true);
             assertEquals("fresh", repo.findById(created.get()).getAttribute("a"));
         });
     }
