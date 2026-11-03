@@ -347,6 +347,36 @@ class JdbcSessionPostgresBudgetTest {
         });
     }
 
+    @Test void orphanPageProvidesLeadingKeyIndexBound() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            try (Statement stmt = fixture.admin().createStatement()) {
+                stmt.execute("INSERT INTO light_session_attributes SELECT lpad(i::text, 8, '0'), 'a', decode('01', 'hex') FROM generate_series(1, 10000) i");
+                stmt.execute("ANALYZE light_session_attributes");
+            }
+            List<String> queries = new ArrayList<>();
+            Connection traced = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (p, m, a) -> {
+                if (m.getName().equals("prepareStatement")) queries.add((String) a[0]);
+                return invokeJdbc(fixture.admin(), m, a);
+            });
+            fixture.admin().setAutoCommit(false);
+            try {
+                var page = JdbcSessionOrphanCleanup.removePage(traced, 2, new JdbcSessionOrphanCleanup.Key("00009000", "a"));
+                assertEquals(2, page.selected()); assertEquals(2, page.removed());
+                assertEquals(new JdbcSessionOrphanCleanup.Key("00009002", "a"), page.lastKey());
+                // Check index eligibility without asserting the cost-based planner's preferences.
+                try (Statement stmt = fixture.admin().createStatement()) { stmt.execute("SET LOCAL enable_seqscan = off"); }
+                List<String> plan = new ArrayList<>();
+                try (PreparedStatement explain = fixture.admin().prepareStatement("EXPLAIN (COSTS OFF) " + queries.getFirst())) {
+                    explain.setString(1, "00009000"); explain.setString(2, "00009000");
+                    explain.setString(3, "00009000"); explain.setString(4, "a");
+                    try (ResultSet rows = explain.executeQuery()) { while (rows.next()) plan.add(rows.getString(1)); }
+                }
+                assertTrue(plan.stream().anyMatch(line -> line.contains("Index Cond:") && line.contains("session_id") && line.contains(">=")), String.join("\n", plan));
+                fixture.admin().commit();
+            } finally { fixture.admin().setAutoCommit(true); }
+        });
+    }
+
     private record Fixture(Connection admin, DataSource source) { }
     @FunctionalInterface private interface DatabaseTest { void run(Fixture fixture) throws Exception; }
 

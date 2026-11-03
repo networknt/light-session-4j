@@ -101,7 +101,7 @@ class JdbcSessionOrphanCleanupTest {
         String url = database(129);
         var result = command(environment(url), "--writers-stopped");
         assertEquals(0, result.exit(), result.output());
-        assertEquals(List.of("Committed orphan attributes: 128", "Committed orphan attributes: 129", "Completed orphan cleanup; removed: 129"), result.output().lines().toList());
+        assertEquals(List.of("Orphan cleanup page: selected=128, removed=128, totalRemoved=128", "Orphan cleanup page: selected=1, removed=1, totalRemoved=129", "Completed orphan cleanup; removed: 129"), result.output().lines().toList());
         onlyValidAttributeRemains(url);
         var rerun = command(environment(url), "--writers-stopped");
         assertEquals(0, rerun.exit(), rerun.output());
@@ -112,9 +112,9 @@ class JdbcSessionOrphanCleanupTest {
         String url = database(4);
         var result = commandWithDriver(environment("jdbc:vanishing:" + url), VanishingKeysDriver.class.getName(), "--writers-stopped", "2");
         assertEquals(0, result.exit(), result.output());
-        assertTrue(result.output().contains("Committed orphan attributes: 0"), result.output());
+        assertTrue(result.output().contains("Orphan cleanup page: selected=2, removed=0, totalRemoved=0"), result.output());
         assertTrue(result.output().contains("Completed orphan cleanup; removed: 2"), result.output());
-        assertTrue(result.output().contains("A.SESSION_ID > ? OR (A.SESSION_ID = ? AND A.ATTRIBUTE_NAME > ?)"), result.output());
+        assertTrue(result.output().contains("A.SESSION_ID >= ? AND (A.SESSION_ID > ? OR (A.SESSION_ID = ? AND A.ATTRIBUTE_NAME > ?))"), result.output());
         onlyValidAttributeRemains(url);
     }
 

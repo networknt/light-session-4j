@@ -310,10 +310,14 @@ Use the actual jar paths and deployment JDBC URL; Windows uses `;` in its classp
 The final argument is a positive attribute-row batch size (default 128). Each page
 selects at most that many orphan keys with JDBC setMaxRows, ordered by the composite
 (SESSION_ID, ATTRIBUTE_NAME) primary key. Later pages select only keys strictly after
-the last selected key. The cursor closes before keyed deletes, which recheck absence
+the last selected key. An additional `SESSION_ID >= ?` lower bound lets the leading
+primary-key column serve as an index seek bound rather than relying on the composite
+OR predicate alone. Actual plan choice and scan work remain database-dependent.
+The cursor closes before keyed deletes, which recheck absence
 of a parent, and each page commits. Progress follows selected keys even if conditional
-deletes affect zero rows; only an empty SELECT ends the run. It prints committed
-delete totals after each nonempty page and a final completion total. Non-NULL, unique
+deletes affect zero rows; only an empty SELECT ends the run. After each committed
+nonempty page it prints selected, removed and totalRemoved counts, including an
+explicit removed=0 for skipped pages, then a final completion total. Non-NULL, unique
 primary keys are required: malformed legacy keys fail the command and roll back the
 page rather than reporting completion. If interrupted or a page fails, restart
 the same command: already committed rows are gone and only remaining orphans are
