@@ -308,9 +308,14 @@ java -cp 'jdbc-manager.jar:jdbc-driver.jar' \
 
 Use the actual jar paths and deployment JDBC URL; Windows uses `;` in its classpath.
 The final argument is a positive attribute-row batch size (default 128). Each page
-selects at most that many orphan keys with JDBC setMaxRows, closes the cursor, deletes
-by both primary-key columns while rechecking absence of a parent, and commits. It
-prints the committed total after each page. If interrupted or a page fails, restart
+selects at most that many orphan keys with JDBC setMaxRows, ordered by the composite
+(SESSION_ID, ATTRIBUTE_NAME) primary key. Later pages select only keys strictly after
+the last selected key. The cursor closes before keyed deletes, which recheck absence
+of a parent, and each page commits. Progress follows selected keys even if conditional
+deletes affect zero rows; only an empty SELECT ends the run. It prints committed
+delete totals after each nonempty page and a final completion total. Non-NULL, unique
+primary keys are required: malformed legacy keys fail the command and roll back the
+page rather than reporting completion. If interrupted or a page fails, restart
 the same command: already committed rows are gone and only remaining orphans are
 selected; no checkpoint file or ID-range editing is required. A failed page rolls
 back and the command fails. Database scan work is not bounded by the page size, but

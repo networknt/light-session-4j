@@ -337,10 +337,12 @@ class JdbcSessionPostgresBudgetTest {
             try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
                 assertTrue(rows.next()); assertEquals(2, rows.getInt(1), "New session and historical orphan must both remain");
             }
-            fixture.admin().setAutoCommit(false);
-            assertEquals(1, JdbcSessionOrphanCleanup.removePage(fixture.admin(), 1));
-            assertEquals(0, JdbcSessionOrphanCleanup.removePage(fixture.admin(), 1));
-            fixture.admin().setAutoCommit(true);
+            String maintenanceUrl = System.getProperty("jdbcPostgresUrl") + "&currentSchema=" + fixture.admin().getSchema();
+            var result = JdbcSessionOrphanCleanupTest.command(Map.of("JDBC_MAINTENANCE_URL", maintenanceUrl), "--writers-stopped", "1");
+            assertEquals(0, result.exit(), result.output());
+            assertTrue(result.output().contains("Completed orphan cleanup; removed: 1"), result.output());
+            var rerun = JdbcSessionOrphanCleanupTest.command(Map.of("JDBC_MAINTENANCE_URL", maintenanceUrl), "--writers-stopped", "1");
+            assertEquals(0, rerun.exit(), rerun.output()); assertTrue(rerun.output().contains("removed: 0"));
             assertEquals("fresh", repo.findById(created.get()).getAttribute("a"));
         });
     }
