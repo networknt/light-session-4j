@@ -45,11 +45,11 @@ class JdbcSessionAggregateLimitTest {
             stmt.setString(1, id); stmt.setString(2, name); stmt.setBytes(3, bytes); stmt.executeUpdate();
         }
     }
-    private long storedExpiry(String id) throws Exception {
+    private Long storedExpiry(String id) throws Exception {
         try (Connection connection = database.getConnection();
              PreparedStatement stmt = connection.prepareStatement("SELECT EXPIRY_TIME FROM light_session WHERE SESSION_ID = ?")) {
             stmt.setString(1, id);
-            try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); return rows.getLong(1); }
+            try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); return rows.getObject(1) == null ? null : rows.getLong(1); }
         }
     }
 
@@ -57,19 +57,21 @@ class JdbcSessionAggregateLimitTest {
         var repo = repository();
         var session = repo.createSession();
         assertEquals(1800, session.getMaxInactiveInterval());
-        assertEquals(session.getLastAccessedTime() + 1_800_000L, storedExpiry(session.getId()));
+        assertEquals(session.getLastAccessedTime() + 1_800_000L, session.getExpiryTime());
+        assertNull(storedExpiry(session.getId()));
         long fiveSecondsAgo = System.currentTimeMillis() - 5_000;
         session.setLastAccessedTime(fiveSecondsAgo);
-        assertEquals(session.getCreationTime() + 1_800_000L, storedExpiry(session.getId()), "Access does not maintain the legacy cache");
+        assertNull(storedExpiry(session.getId()), "Access must not publish an expiry cache");
         assertNotNull(repo.findById(session.getId()));
         assertTrue(repo.getSessions().containsKey(session.getId()), "Default session must survive more than 1.8 seconds");
 
         session.setMaxInactiveInterval(60);
         repo.save(session);
-        assertEquals(fiveSecondsAgo + 60_000L, storedExpiry(session.getId()));
+        assertEquals(fiveSecondsAgo + 60_000L, session.getExpiryTime());
+        assertNull(storedExpiry(session.getId()));
         long refreshed = System.currentTimeMillis();
         session.setLastAccessedTime(refreshed);
-        assertEquals(fiveSecondsAgo + 60_000L, storedExpiry(session.getId()), "Liveness must work with a stale cache");
+        assertNull(storedExpiry(session.getId()));
         assertEquals(refreshed, repo.findById(session.getId()).getLastAccessedTime());
         repo.cleanUpExpiredSessions();
         assertTrue(repo.getSessions().containsKey(session.getId()));
@@ -84,15 +86,15 @@ class JdbcSessionAggregateLimitTest {
         var session = repo.createSession();
         session.setLastAccessedTime(1);
         assertEquals(Long.MAX_VALUE, session.getExpiryTime());
-        assertEquals(Long.MAX_VALUE, storedExpiry(session.getId()));
+        assertNull(storedExpiry(session.getId()));
         repo.cleanUpExpiredSessions();
         assertNotNull(repo.findById(session.getId()));
         assertTrue(repo.getSessions().containsKey(session.getId()));
         session.setMaxInactiveInterval(Integer.MAX_VALUE);
         repo.save(session);
-        assertEquals(1L + Integer.MAX_VALUE * 1000L, storedExpiry(session.getId()));
+        assertNull(storedExpiry(session.getId()));
         session.setLastAccessedTime(2);
-        assertEquals(1L + Integer.MAX_VALUE * 1000L, storedExpiry(session.getId()));
+        assertNull(storedExpiry(session.getId()));
         assertTrue(repo.getSessions().containsKey(session.getId()), "SQL timeout multiplication must not overflow");
         session.setMaxInactiveInterval(0); repo.save(session);
         assertFalse(repo.getSessions().containsKey(session.getId()));
@@ -242,6 +244,99 @@ class JdbcSessionAggregateLimitTest {
         assertDoesNotThrow(() -> loaded.setLastAccessedTime(System.currentTimeMillis()));
         assertDoesNotThrow(() -> repo.updateSessionLastAccessTime(session.getId()));
         assertNull(repo.findById(session.getId())); assertTrue(repo.getSessions().isEmpty());
+    }
+
+    private int rowCount(String table, String id) throws Exception {
+        try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement("SELECT COUNT(*) FROM " + table + " WHERE SESSION_ID = ?")) {
+            stmt.setString(1, id);
+            try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); return rows.getInt(1); }
+        }
+    }
+
+    @Test void lateAccessCannotReviveExpiredZeroOrNullTimeoutRows() throws Exception {
+        var repo = repository();
+        for (Integer timeout : Arrays.asList(1, 0, null)) {
+            var session = repo.createSession(); var late = repo.findById(session.getId());
+            long expiredAccess = System.currentTimeMillis() - 5_000;
+            try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement(
+                    "UPDATE light_session SET LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = 9223372036854775807 WHERE SESSION_ID = ?")) {
+                stmt.setLong(1, expiredAccess);
+                if (timeout == null) stmt.setNull(2, Types.INTEGER); else stmt.setInt(2, timeout);
+                stmt.setString(3, session.getId()); stmt.executeUpdate();
+            }
+            repo.updateSessionLastAccessTime(session.getId());
+            late.setMaxInactiveInterval(-1); // A pending never-expire edit must not bypass stored liveness.
+            late.setLastAccessedTime(Long.MAX_VALUE);
+            assertFalse(repo.getSessions().containsKey(session.getId()));
+            try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement("SELECT LAST_ACCESS_TIME FROM light_session WHERE SESSION_ID = ?")) {
+                stmt.setString(1, session.getId());
+                try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); assertEquals(expiredAccess, rows.getLong(1)); }
+            }
+            assertNull(repo.findById(session.getId()));
+        }
+    }
+
+    @Test void successfulWritesInvalidateTheReservedExpiryColumn() throws Exception {
+        var repo = repository(); var session = repo.createSession(); assertNull(storedExpiry(session.getId()));
+        for (boolean access : new boolean[]{false, true}) {
+            try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement("UPDATE light_session SET EXPIRY_TIME = 123 WHERE SESSION_ID = ?")) {
+                stmt.setString(1, session.getId()); stmt.executeUpdate();
+            }
+            if (access) session.setLastAccessedTime(System.currentTimeMillis()); else repo.save(session);
+            assertNull(storedExpiry(session.getId()));
+        }
+    }
+
+    @Test void deleteAndCleanupRemoveAttributesIncludingHistoricalOrphans() throws Exception {
+        var repo = repository(); var explicit = repo.createSession(); explicit.setAttribute("a", "one"); explicit.setAttribute("b", "two");
+        repo.deleteById(explicit.getId());
+        assertEquals(0, rowCount("light_session", explicit.getId()));
+        assertEquals(0, rowCount("light_session_attributes", explicit.getId()));
+        var healthy = repo.createSession(); healthy.setAttribute("a", "keep");
+        var zero = repo.createSession(); zero.setAttribute("a", "remove"); zero.setMaxInactiveInterval(0); repo.save(zero);
+        var legacyNull = repo.createSession(); legacyNull.setAttribute("a", "remove");
+        try (Connection connection = database.getConnection(); PreparedStatement stmt = connection.prepareStatement("UPDATE light_session SET MAX_INACTIVE_INTERVAL = NULL WHERE SESSION_ID = ?")) {
+            stmt.setString(1, legacyNull.getId()); stmt.executeUpdate();
+        }
+        attribute("old-orphan", "a", "remove");
+        repo.cleanUpExpiredSessions();
+        assertEquals(Set.of(healthy.getId()), repo.getSessions().keySet());
+        for (String id : List.of(zero.getId(), legacyNull.getId(), "old-orphan")) {
+            assertEquals(0, rowCount("light_session", id)); assertEquals(0, rowCount("light_session_attributes", id));
+        }
+        assertEquals(1, rowCount("light_session_attributes", healthy.getId()));
+    }
+
+    @Test void childDeleteFailureRollsBackParentDeletionAndRestoresConnectionState() throws Exception {
+        var writer = repository();
+        for (boolean expiredOnly : new boolean[]{false, true}) {
+            var session = writer.createSession(); session.setAttribute("a", "retained");
+            if (expiredOnly) { session.setMaxInactiveInterval(0); writer.save(session); }
+            var rollbacks = new java.util.concurrent.atomic.AtomicInteger();
+            var restored = new java.util.concurrent.atomic.AtomicBoolean();
+            javax.sql.DataSource failing = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{javax.sql.DataSource.class},
+                    (p, m, a) -> {
+                        if (!m.getName().equals("getConnection")) return invoke(database, m, a);
+                        Connection connection = database.getConnection();
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                            if (cm.getName().equals("rollback")) rollbacks.incrementAndGet();
+                            if (cm.getName().equals("close")) restored.set(connection.getAutoCommit());
+                            Object value = invoke(connection, cm, ca);
+                            if (!cm.getName().equals("prepareStatement") || !ca[0].toString().startsWith("DELETE FROM light_session_attributes")) return value;
+                            PreparedStatement statement = (PreparedStatement) value;
+                            return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                                if (sm.getName().equals("executeUpdate")) throw new SQLException("synthetic child delete failure");
+                                return invoke(statement, sm, sa);
+                            });
+                        });
+                    });
+            var repo = new JdbcSessionRepository(failing);
+            if (expiredOnly) repo.cleanUpExpiredSessions(); else repo.deleteById(session.getId());
+            assertEquals(1, rollbacks.get()); assertTrue(restored.get());
+            assertEquals(1, rowCount("light_session", session.getId()));
+            assertEquals(1, rowCount("light_session_attributes", session.getId()));
+            writer.deleteById(session.getId());
+        }
     }
 
     @Test void writeCountRejectsBeforeSqlAndRetainsPendingChange() {

@@ -16,14 +16,27 @@ class JdbcSessionConnectionCleanupTest {
             Stub jdbc = new Stub(); jdbc.product = product;
             var repo = jdbc.repository(); var session = repo.new JdbcSession(new MapSession("loaded"));
             session.setMaxInactiveInterval(60); session.setLastAccessedTime(10_000L);
-            assertEquals(List.of("UPDATE light_session SET LAST_ACCESS_TIME = ? WHERE SESSION_ID = ?"), jdbc.queries);
-            assertEquals(Map.of(1, 10_000L, 2, "loaded"), jdbc.accessParameters);
+            assertEquals(1, jdbc.queries.size());
+            assertTrue(jdbc.queries.getFirst().startsWith("UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = NULL WHERE SESSION_ID = ? AND "));
+            assertEquals(10_000L, jdbc.accessParameters.get(1)); assertEquals("loaded", jdbc.accessParameters.get(2));
+            assertTrue((Long) jdbc.accessParameters.get(3) > 20_000L, "Guard must use wall-clock time, not the requested access time");
             assertEquals(0, jdbc.metadataGets);
             session.setMaxInactiveInterval(-1); session.setLastAccessedTime(20_000L);
-            assertEquals(Map.of(1, 20_000L, 2, "loaded"), jdbc.accessParameters);
+            assertEquals(20_000L, jdbc.accessParameters.get(1)); assertEquals("loaded", jdbc.accessParameters.get(2));
             repo.updateSessionLastAccessTime("missing");
             assertEquals(3, jdbc.queries.size());
             assertTrue(jdbc.queries.stream().allMatch(q -> q.equals(jdbc.queries.getFirst())), "No timeout lookup or retry query");
+        }
+    }
+
+    @Test void deletionWithFailedRollbackAbortsWithoutRestoringAutocommit() {
+        for (boolean cleanup : new boolean[]{false, true}) {
+            Stub jdbc = new Stub(); jdbc.writeFailure = true; jdbc.rollbackFailure = true;
+            var repo = jdbc.repository();
+            if (cleanup) repo.cleanUpExpiredSessions(); else repo.deleteById("session");
+            assertEquals(1, jdbc.aborts); assertEquals(1, jdbc.rollbacks); assertTrue(jdbc.closed);
+            assertEquals(List.of(false), jdbc.autoCommitSets, "Unresolved deletion must not be committed by restoration");
+            assertEquals(List.of(jdbc.rollbackError), Arrays.asList(jdbc.writeError.getSuppressed()));
         }
     }
 

@@ -211,6 +211,92 @@ class JdbcSessionPostgresBudgetTest {
         });
     }
 
+    @Test void lateAccessCannotReviveAndDeletionRemovesAttributesWithoutCascade() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var repo = new JdbcSessionRepository(fixture.source()); var healthy = repo.createSession(); healthy.setAttribute("a", "keep");
+            for (Integer timeout : Arrays.asList(1, 0, null)) {
+                var session = repo.createSession(); session.setAttribute("a", "delete"); var late = repo.findById(session.getId());
+                long oldAccess = System.currentTimeMillis() - 5_000;
+                try (PreparedStatement stmt = fixture.admin().prepareStatement("UPDATE light_session SET LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ? WHERE SESSION_ID = ?")) {
+                    stmt.setLong(1, oldAccess); if (timeout == null) stmt.setNull(2, Types.INTEGER); else stmt.setInt(2, timeout);
+                    stmt.setString(3, session.getId()); stmt.executeUpdate();
+                }
+                repo.updateSessionLastAccessTime(session.getId()); late.setMaxInactiveInterval(-1); late.setLastAccessedTime(Long.MAX_VALUE);
+                try (PreparedStatement stmt = fixture.admin().prepareStatement("SELECT LAST_ACCESS_TIME FROM light_session WHERE SESSION_ID = ?")) {
+                    stmt.setString(1, session.getId()); try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); assertEquals(oldAccess, rows.getLong(1)); }
+                }
+            }
+            try (PreparedStatement stmt = fixture.admin().prepareStatement("INSERT INTO light_session_attributes VALUES (?, ?, ?)")) {
+                stmt.setString(1, "legacy-orphan"); stmt.setString(2, "a"); stmt.setBytes(3, new ValueBytesConverter().serializer("orphan")); stmt.executeUpdate();
+            }
+            repo.cleanUpExpiredSessions(); assertEquals(Set.of(healthy.getId()), repo.getSessions().keySet());
+            try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
+                assertTrue(rows.next()); assertEquals(1, rows.getInt(1));
+            }
+            repo.deleteById(healthy.getId());
+            try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
+                assertTrue(rows.next()); assertEquals(0, rows.getInt(1));
+            }
+        });
+    }
+
+    private static Object invokeJdbc(Object target, java.lang.reflect.Method method, Object[] args) throws Throwable {
+        try { return method.invoke(target, args); }
+        catch (InvocationTargetException e) { throw e.getCause(); }
+    }
+
+    private static DataSource parentStatementHook(DataSource source, boolean deleting, CountDownLatch deleted, CountDownLatch writerEntered) {
+        return (DataSource) Proxy.newProxyInstance(JdbcSessionPostgresBudgetTest.class.getClassLoader(), new Class<?>[]{DataSource.class}, (p, m, a) -> {
+            Connection connection = (Connection) invokeJdbc(source, m, a);
+            return Proxy.newProxyInstance(JdbcSessionPostgresBudgetTest.class.getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                Object value = invokeJdbc(connection, cm, ca);
+                if (!cm.getName().equals("prepareStatement")) return value;
+                String prefix = deleting ? "DELETE FROM light_session " : "UPDATE light_session SET SESSION_ID";
+                if (!ca[0].toString().startsWith(prefix)) return value;
+                PreparedStatement statement = (PreparedStatement) value;
+                return Proxy.newProxyInstance(JdbcSessionPostgresBudgetTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                    boolean execute = sm.getName().equals("executeUpdate");
+                    if (execute && !deleting) writerEntered.countDown();
+                    Object result = invokeJdbc(statement, sm, sa);
+                    if (execute && deleting) {
+                        assertEquals(1, result); deleted.countDown();
+                        assertTrue(writerEntered.await(10, TimeUnit.SECONDS));
+                    }
+                    return result;
+                });
+            });
+        });
+    }
+
+    @Test void concurrentSaveCannotInsertAttributesAfterDeleteOrCleanup() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var repo = new JdbcSessionRepository(fixture.source());
+            for (boolean cleanup : new boolean[]{false, true}) {
+                var session = repo.createSession(); session.setAttribute("a", "old"); var stale = repo.findById(session.getId());
+                if (cleanup) { session.setMaxInactiveInterval(0); repo.save(session); }
+                CountDownLatch deleted = new CountDownLatch(1), writerEntered = new CountDownLatch(1);
+                var deleter = new JdbcSessionRepository(parentStatementHook(fixture.source(), true, deleted, writerEntered));
+                var saver = new JdbcSessionRepository(parentStatementHook(fixture.source(), false, deleted, writerEntered));
+                // Load a session owned by the hooked saver before deletion starts.
+                var pending = saver.new JdbcSession(new com.networknt.session.MapSession(stale));
+                ExecutorService pool = Executors.newFixedThreadPool(2);
+                try {
+                    Future<?> deletion = pool.submit(() -> { if (cleanup) deleter.cleanUpExpiredSessions(); else deleter.deleteById(session.getId()); });
+                    assertTrue(deleted.await(10, TimeUnit.SECONDS));
+                    Future<?> save = pool.submit(() -> pending.setAttribute("new", "must not persist"));
+                    deletion.get(10, TimeUnit.SECONDS);
+                    ExecutionException rejected = assertThrows(ExecutionException.class, () -> save.get(10, TimeUnit.SECONDS));
+                    assertInstanceOf(IllegalStateException.class, rejected.getCause());
+                    assertTrue(pending.getDelta().containsKey("new"));
+                } finally { writerEntered.countDown(); pool.shutdownNow(); pool.awaitTermination(10, TimeUnit.SECONDS); }
+                try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
+                    assertTrue(rows.next()); assertEquals(0, rows.getInt(1));
+                }
+                assertNull(repo.findById(session.getId()));
+            }
+        });
+    }
+
     private record Fixture(Connection admin, DataSource source) { }
     @FunctionalInterface private interface DatabaseTest { void run(Fixture fixture) throws Exception; }
 
