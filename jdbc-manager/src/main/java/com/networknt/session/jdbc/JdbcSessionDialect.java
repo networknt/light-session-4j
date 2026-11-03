@@ -57,6 +57,11 @@ enum JdbcSessionDialect {
         };
     }
 
+    /** These families can report changed rather than matched rows. Unknown drivers stay conservative. */
+    boolean mayReportChangedRows() {
+        return this == MYSQL || this == MARIADB || this == BLOB;
+    }
+
     void bind(PreparedStatement stmt, int index, byte[] bytes) throws SQLException {
         ByteArrayInputStream stream = new ByteArrayInputStream(bytes);
         if (binaryStream) stmt.setBinaryStream(index, stream, bytes.length);

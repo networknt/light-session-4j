@@ -408,7 +408,8 @@ public class JdbcSessionRepository implements
                     stmt.setString(2, session.getId()); stmt.setString(3, name);
                     count = stmt.executeUpdate();
                 }
-                if (count == 0 && !attributeExists(connection, session.getId(), name))
+                if (count == 0 && (!dialect(connection).mayReportChangedRows()
+                        || !attributeExists(connection, session.getId(), name)))
                     insertAttribute(connection, session.getId(), name, bytes);
             }
         }

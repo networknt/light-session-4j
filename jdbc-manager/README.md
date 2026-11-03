@@ -86,8 +86,8 @@ stream ownership/cleanup, and null/corrupt/I/O failures. Public H2 repository te
 exercise oversized setAttribute(), failed createSession(), explicit rollback after
 partial SQL work, correction/retry, mixed valid/rejected sessions and read-only
 hydration (including a custom writeObject counter). Existing H2 HTTP-session tests
-also run. The default suite uses H2 only; the opt-in PostgreSQL contract below uses
-a caller-supplied disposable database, never production sessions.
+also run. The default suite uses H2 only; the opt-in PostgreSQL and MySQL contracts
+below use caller-supplied disposable databases, never production sessions.
 
 ```sh
 mvn -pl jdbc-manager -am test
@@ -110,7 +110,10 @@ integer system properties captured when a repository is constructed:
 | maxListingBytes | 67108864 serialized bytes per result |
 | maxListingSessions | 1000 distinct session IDs, including rejected sessions |
 | maxListingRows | 65000 JDBC result rows |
-| cleanupBatchSize | 128 expired session IDs per transaction |
+
+Expiry cleanup uses the separate `light.session.jdbc.cleanupBatchSize` property
+(default 128 expired session IDs per transaction), captured at repository construction.
+The unreleased serialization-prefixed cleanup property is not supported.
 
 Existing per-attribute byte and object-graph/class restrictions still apply.
 Save serializes only pending values before acquiring a connection. Obvious pending
@@ -147,8 +150,8 @@ BIGINT *before* SUM to prevent INTEGER aggregate overflow. Each optimized check
 returns one count/byte-total row under the parent lock. Empty new sessions and saves
 without attribute changes skip validation. The blob override selects Blob.length()/
 Blob.free() locator validation; materialization remains driver-dependent. PostgreSQL
-BYTEA uses binary-stream binding; other policies retain setBlob. CI contracts exercise H2/PostgreSQL; other deployment SQL and binding behavior
-still require driver qualification.
+BYTEA uses binary-stream binding; other policies retain setBlob. CI contracts exercise H2, PostgreSQL and MySQL; other deployment SQL and binding
+behavior still require driver qualification.
 
 Only saves that need stored validation inspect isolation and temporarily select
 READ_COMMITTED if necessary. The original isolation is restored only when changed.
@@ -223,8 +226,12 @@ a save of a still-live row commits. There is one UPDATE per access, with no time
 snapshot or retry loop. If a driver reports zero changed rows for an unchanged
 UPDATE, one bounded read verifies the requested live state before treating it as a
 refusal. The same verification handles unchanged saves in affected-row count mode. Attribute
-upserts with a zero update count check the keyed attribute's existence under the
-parent lock, so repeating an identical value does not attempt a duplicate INSERT.
+upserts use the cached dialect capability: MySQL, MariaDB and unknown/BLOB drivers
+check the keyed attribute's existence after a zero count under the parent lock.
+Known matched-row dialects (PostgreSQL, H2, Oracle, SQL Server and DB2) insert directly
+after an unmatched UPDATE, retaining UPDATE + INSERT for a new attribute. MySQL-family
+connections conservatively retain UPDATE + SELECT + INSERT for a new attribute even
+in their found-row mode; repeating an identical value never attempts a duplicate INSERT.
 See [Connector/J affected-row settings](https://dev.mysql.com/doc/connector-j/en/connector-j-connp-props-connection.html).
 
 EXPIRY_TIME is a reserved legacy column. New sessions, full saves and successful
@@ -238,7 +245,7 @@ required by the corrected repository.
 Save and deletion share one transaction handler for commit, rollback/abort and
 borrowed-connection restoration. Delete-by-ID removes a parent and its attributes in
 one transaction. Expiry cleanup selects primary-key ID pages controlled by
-light.session.jdbc.serialization.cleanupBatchSize (default 128, captured at repository
+light.session.jdbc.cleanupBatchSize (default 128, captured at repository
 construction),
 rechecks expiry on each conditional parent DELETE, and deletes attributes only for IDs
 whose parent it actually deleted in that transaction. It commits each page; a failed
@@ -286,17 +293,33 @@ WHERE NOT EXISTS (SELECT 1 FROM light_session S WHERE S.SESSION_ID = A.SESSION_I
 
 ### Explicit historical-orphan maintenance
 
-A runnable SQL-client script ships at
-[maintenance/delete_orphan_session_attributes.sql](src/main/resources/maintenance/delete_orphan_session_attributes.sql).
-It has no bind parameters and is never run by startup or routine cleanup. Stop all
-session writers and cleanup, take the inventory/backup required by the deployment,
-then run the file in psql, SQL*Plus, sqlcmd or the deployment's SQL client. Commit
-according to that client's transaction settings, confirm the orphan count is zero,
-and resume writers. The maintenance window is required because this explicit global
-anti-join is not safe to infer against concurrent parent inserts. It removes only
-rows without parents and leaves valid session attributes intact. No operator-written
-JDBC loop or new schema is required. The script is exercised in disposable H2 and
-PostgreSQL fixtures; other deployment drivers remain owner-qualified.
+The explicit offline command `com.networknt.session.jdbc.JdbcSessionOrphanCleanup`
+replaces the former global DELETE script. It is never called by startup or routine
+cleanup. Stop **all session writers and cleanup**, take deployment-required inventory
+and backup, and run it with the JDBC manager jar and the deployment's driver jar:
+
+```bash
+export JDBC_MAINTENANCE_URL='jdbc:postgresql://localhost/session_database'
+export JDBC_MAINTENANCE_USER='maintenance_user'
+# Supply JDBC_MAINTENANCE_PASSWORD through the deployment's secret mechanism.
+java -cp 'jdbc-manager.jar:jdbc-driver.jar' \
+  com.networknt.session.jdbc.JdbcSessionOrphanCleanup --writers-stopped 128
+```
+
+Use the actual jar paths and deployment JDBC URL; Windows uses `;` in its classpath.
+The final argument is a positive attribute-row batch size (default 128). Each page
+selects at most that many orphan keys with JDBC setMaxRows, closes the cursor, deletes
+by both primary-key columns while rechecking absence of a parent, and commits. It
+prints the committed total after each page. If interrupted or a page fails, restart
+the same command: already committed rows are gone and only remaining orphans are
+selected; no checkpoint file or ID-range editing is required. A failed page rolls
+back and the command fails. Database scan work is not bounded by the page size, but
+the number of rows retained and deleted per transaction is bounded. The command
+requires a dedicated non-autocommit connection internally and does not share the
+application pool. Confirm the inventory count is zero before resuming writers.
+It is exercised against disposable H2, PostgreSQL and MySQL databases; other
+engines still require deployment-driver qualification. The offline requirement is
+essential: the parent-absence test is not safe against concurrent new-session writers.
 
 The computed predicate may scan session metadata and cannot rely on an index on
 EXPIRY_TIME. It avoids reading attribute payloads during ID selection; result limits
@@ -343,3 +366,21 @@ unknown-product fallback, settings-call counts, and rollback/restore/abort failu
 through scripted JDBC objects; those tests do not qualify vendor drivers. Local
 PostgreSQL qualification does not establish Oracle driver behavior, production
 pool behavior, or deployment readiness.
+
+### Disposable MySQL affected-row contracts
+
+The `jdbc-mysql-tests` Maven profile adds only the test driver, versioned through the
+parent dependency management. The tests require an explicitly supplied disposable
+MySQL database and own/drop its session tables. Never point them at application data.
+CI runs these alongside the H2 and PostgreSQL contracts using a digest-pinned MySQL
+8.4 service. Both `useAffectedRows=false` and `true` are exercised against real
+Connector/J, including unchanged refresh/save, repeated attribute updates, parent
+locking, manager refusal, SQL failure classification, lookup/listing and resumable
+offline maintenance. MariaDB is not qualified by the MySQL contract.
+
+```bash
+mvn -pl jdbc-manager -am -Pjdbc-postgres-tests,jdbc-mysql-tests \
+  '-DjdbcPostgresUrl=jdbc:postgresql://127.0.0.1:PGPORT/budget?user=budget&password=budget' \
+  '-DjdbcMysqlUrl=jdbc:mysql://127.0.0.1:MYSQLPORT/budget?user=budget&password=budget&allowPublicKeyRetrieval=true&useSSL=false' \
+  test
+```
