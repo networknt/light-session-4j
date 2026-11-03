@@ -9,7 +9,7 @@ public class ValueBytesConverter {
 
 
     private final int maxSerializedBytes;
-    private final Deserializer<Object> deserializer;
+    private final DefaultDeserializer deserializer;
     private final Serializer<Object> serializer;
 
     public ValueBytesConverter() {
@@ -17,6 +17,7 @@ public class ValueBytesConverter {
         this.deserializer = new DefaultDeserializer(maxSerializedBytes);
         this.serializer = new DefaultSerializer();
     }
+
 
 
 
@@ -33,13 +34,16 @@ public class ValueBytesConverter {
 
     /** Read one complete serialized attribute with a hard byte limit; caller owns the stream. */
     public Object deserializeStream(InputStream source) throws SerializationFailedException {
+        return deserializeStream(source, maxSerializedBytes).value();
+    }
+
+    public DefaultDeserializer.DecodedAttribute deserializeStream(InputStream source, int budget) throws SerializationFailedException {
         try {
-            return this.deserializer.deserialize(source);
-        }
-        catch (Throwable ex) {
-            throw new SerializationFailedException("Failed to deserialize payload. " +
-                    "Is the byte array a result of corresponding serialization for " +
-                    this.deserializer.getClass().getSimpleName() + "?", ex);
+            return deserializer.deserializeBounded(source, budget);
+        } catch (SerializationFailedException ex) {
+            throw ex;
+        } catch (Throwable ex) {
+            throw new SerializationFailedException("Failed to deserialize payload", ex);
         }
     }
 

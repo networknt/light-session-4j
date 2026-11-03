@@ -103,24 +103,26 @@ public class DefaultDeserializer implements Deserializer<Object> {
      */
     @Override
     public Object deserialize(InputStream inputStream) throws IOException, SerializationFailedException {
-        if (inputStream == null) {
-            throw new SerializationFailedException("Serialized session attribute must not be null");
-        }
-        // ObjectInputFilter is not invoked for concrete strings. Validate the complete
-        // bounded input before any readObject hook or string allocation can occur.
-        byte[] bytes = inputStream.readNBytes(maxSerializedBytes + 1);
-        if (bytes.length > maxSerializedBytes) {
-            throw new SerializationFailedException("Serialized session attribute exceeds " + maxSerializedBytes + " bytes");
-        }
+        return deserializeBounded(inputStream, maxSerializedBytes).value();
+    }
+
+    public record DecodedAttribute(Object value, int bytes) { }
+
+    public DecodedAttribute deserializeBounded(InputStream inputStream, int budget) throws IOException, SerializationFailedException {
+        int effective = Math.min(maxSerializedBytes, budget);
+        AttributeReadException.Reason reason = maxSerializedBytes <= budget
+                ? AttributeReadException.Reason.ATTRIBUTE_BYTES : AttributeReadException.Reason.SESSION_BYTES;
+        if (inputStream == null) throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, 0, null);
+        // One bounded read owns all byte accounting. Hooks only see the resulting buffer.
+        byte[] bytes = inputStream.readNBytes(effective + 1);
+        if (bytes.length > effective) throw new AttributeReadException(reason, bytes.length, null);
         try (ObjectInputStream objectInputStream = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
             objectInputStream.setObjectInputFilter(this::validateObjectInput);
-            return objectInputStream.readObject();
-        }
-        catch (InvalidClassException ex) {
-            throw new SerializationFailedException("Rejected deserialization of disallowed object type", ex);
-        }
-        catch (ClassNotFoundException ex) {
-            throw new SerializationFailedException("Failed to deserialize object type", ex);
+            return new DecodedAttribute(objectInputStream.readObject(), bytes.length);
+        } catch (InvalidClassException ex) {
+            throw new AttributeReadException(AttributeReadException.Reason.FILTER, bytes.length, ex);
+        } catch (IOException | ClassNotFoundException | RuntimeException ex) {
+            throw new AttributeReadException(AttributeReadException.Reason.CORRUPT_DATA, bytes.length, ex);
         }
     }
 
