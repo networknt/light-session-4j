@@ -205,18 +205,54 @@ A negative timeout never expires. SQL NULL retains the historical getInt(NULL) =
 behavior: it means zero timeout, not a new 1800-second default. Reads do not rewrite
 MAX_INACTIVE_INTERVAL. Widening before multiplication supports large integer timeouts.
 
-Access updates only LAST_ACCESS_TIME in one statement. Pending timeout edits take
-effect in the database when save() writes MAX_INACTIVE_INTERVAL. No timeout snapshot,
-lookup, conditional-update variant or retry loop is needed. Deleting the row before
-an access update simply leaves no row to update.
+Access updates LAST_ACCESS_TIME only while the stored row is still live, using the
+same predicate and the wall-clock time of the update attempt. Both the public ID-only
+method and a late setLastAccessedTime cannot revive an already expired row; a future
+requested access timestamp or pending timeout change does not bypass that check.
+Pending timeout edits affect stored liveness when save() writes MAX_INACTIVE_INTERVAL.
+There is one UPDATE per access, with no timeout snapshot, lookup or retry loop.
 
-EXPIRY_TIME remains in the schema and is written on full saves for compatibility,
-but this repository does not use it to determine liveness. Stale, NULL, or future
-cache values, including values rewritten by old writers, cannot hide live sessions
-or preserve expired sessions in the corrected listing/cleanup paths. No expiry
-migration, custom runner, checkpoint process or writer shutdown is required.
-Older binaries that still run their own EXPIRY_TIME-based listing/cleanup retain
-that historical bug; upgrade those readers/cleanup implementations before using them.
+EXPIRY_TIME is a reserved legacy column. New sessions, full saves and successful
+access updates explicitly write NULL, rather than a plausible but stale timestamp.
+Existing cache values are ignored. Dashboards and external cleanup must derive
+liveness from LAST_ACCESS_TIME/MAX_INACTIVE_INTERVAL; the column must not be used
+as an expiry signal. Older binaries using it for their own listing/cleanup must be
+upgraded before those readers/cleanup jobs are used. No expiry data migration is
+required by the corrected repository.
+
+Delete-by-ID removes the parent and its attributes in one transaction. Expiry cleanup
+also deletes parents first and sweeps orphaned attributes before committing, including
+orphans left by previous versions. A child-delete failure rolls back parent deletion.
+This uses the same parent-first lock order as repository saves and does not require a
+schema/cascade migration for the shipped schemas. Direct writers outside that locking protocol remain outside
+the guarantee.
+
+### Before enabling corrected cleanup
+
+Cleanup now reliably deletes expired zero-timeout and NULL-timeout sessions, together
+with their attributes. NULL remains zero; it is not normalized to a 30-minute timeout.
+Inventory these rows before enabling cleanup with the following plain SQL. These
+counts are upper bounds if any LAST_ACCESS_TIME values are future-dated; cleanup
+removes each row once that time is reached:
+
+```sql
+SELECT COUNT(*) FROM light_session
+WHERE MAX_INACTIVE_INTERVAL IS NULL;
+```
+
+```sql
+SELECT COUNT(*) FROM light_session
+WHERE MAX_INACTIVE_INTERVAL = 0;
+```
+
+If these rows need investigation or application-specific recovery, keep cleanup
+scheduled off until that work is complete. Cleanup also removes existing attribute
+orphans; inventory their count with:
+
+```sql
+SELECT COUNT(*) FROM light_session_attributes A
+WHERE NOT EXISTS (SELECT 1 FROM light_session S WHERE S.SESSION_ID = A.SESSION_ID);
+```
 
 The computed predicate may scan session metadata and cannot rely on an index on
 EXPIRY_TIME. It avoids reading attribute payloads during ID selection; result limits

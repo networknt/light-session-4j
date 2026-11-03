@@ -58,7 +58,7 @@ public class JdbcSessionRepository implements
 
     private static final String CREATE_SESSION_QUERY =
             "INSERT INTO light_session(SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME) " +
-                    "VALUES (?, ?, ?, ?, ?, ?)";
+                    "VALUES (?, ?, ?, ?, NULL, ?)";
 
     private static final String CREATE_SESSION_ATTRIBUTE_QUERY =
             "INSERT INTO light_session_attributes(SESSION_ID, ATTRIBUTE_NAME, ATTRIBUTE_BYTES) " +
@@ -82,11 +82,11 @@ public class JdbcSessionRepository implements
             "SELECT SESSION_ID FROM light_session WHERE " + LIVE_SESSION_PREDICATE;
 
     private static final String UPDATE_SESSION_QUERY =
-            "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ? " +
+            "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = NULL, PRINCIPAL_NAME = ? " +
                     "WHERE SESSION_ID = ?";
 
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
-            "UPDATE light_session SET LAST_ACCESS_TIME = ? WHERE SESSION_ID = ?";
+            "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = NULL WHERE SESSION_ID = ? AND " + LIVE_SESSION_PREDICATE;
 
     private static final String UPDATE_SESSION_ATTRIBUTE_QUERY =
             "UPDATE light_session_attributes SET ATTRIBUTE_BYTES = ? " +
@@ -108,9 +108,16 @@ public class JdbcSessionRepository implements
                     "LEFT OUTER JOIN light_session_attributes SA ON S.PRIMARY_ID = SA.SESSION_PRIMARY_ID " +
                     "WHERE S.PRINCIPAL_NAME = ?";
 
-    private static final String DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY =
+    private static final String DELETE_EXPIRED_SESSIONS_QUERY =
             "DELETE FROM light_session " +
                     "WHERE NOT " + LIVE_SESSION_PREDICATE;
+
+    private static final String DELETE_SESSION_ATTRIBUTES_QUERY =
+            "DELETE FROM light_session_attributes WHERE SESSION_ID = ?";
+
+    private static final String DELETE_ORPHAN_ATTRIBUTES_QUERY =
+            "DELETE FROM light_session_attributes WHERE NOT EXISTS " +
+                    "(SELECT 1 FROM light_session S WHERE S.SESSION_ID = light_session_attributes.SESSION_ID)";
 
     private static final Logger logger = LoggerFactory.getLogger(JdbcSessionRepository.class);
 
@@ -126,7 +133,9 @@ public class JdbcSessionRepository implements
     private String deleteSessionAttributeQuery;
     private String deleteSessionQuery;
     private String listSessionsByPrincipalNameQuery;
-    private String deleteSessionsByExpiryTimeQuery;
+    private String deleteExpiredSessionsQuery;
+    private String deleteSessionAttributesQuery;
+    private String deleteOrphanAttributesQuery;
 
     private Integer defaultMaxInactiveInterval = 30 * 60;
 
@@ -347,14 +356,12 @@ public class JdbcSessionRepository implements
                 stmt.setLong(2, session.getCreationTime());
                 stmt.setLong(3, session.getLastAccessedTime());
                 stmt.setInt(4, session.getMaxInactiveInterval());
-                stmt.setLong(5, session.getExpiryTime());
-                stmt.setString(6, session.getPrincipalName());
+                stmt.setString(5, session.getPrincipalName());
             } else {
                 stmt.setLong(2, session.getLastAccessedTime());
                 stmt.setInt(3, session.getMaxInactiveInterval());
-                stmt.setLong(4, session.getExpiryTime());
-                stmt.setString(5, session.getPrincipalName());
-                stmt.setString(6, session.getId());
+                stmt.setString(4, session.getPrincipalName());
+                stmt.setString(5, session.getId());
             }
             if (stmt.executeUpdate() != 1) throw new SQLException("JDBC session row was not written");
         }
@@ -471,30 +478,61 @@ public class JdbcSessionRepository implements
 
     @Override
     public void deleteById(final String id) {
-        try (final Connection connection = dataSource.getConnection()) {
-            try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionQuery)) {
-                psAtt.setString(1, id);
-                psAtt.executeUpdate();
-            }
-        } catch (SQLException e) {
-            logger.error("SqlException:", e);
-        }
+        try { deleteSessions(false, id); }
+        catch (SQLException e) { logger.error("SqlException:", e); }
     }
 
     public void cleanUpExpiredSessions() {
-        int deletedCount = 0;
-        try (final Connection connection = dataSource.getConnection()) {
-            try (PreparedStatement psAtt = connection.prepareStatement(this.deleteSessionsByExpiryTimeQuery)) {
-                psAtt.setLong(1, System.currentTimeMillis());
-                psAtt.executeUpdate();
+        try {
+            int deleted = deleteSessions(true, null);
+            logger.debug("Cleaned up {} expired sessions", deleted);
+        } catch (SQLException e) { logger.error("SqlException:", e); }
+    }
+
+    /** Parent-first deletion shares save's lock order; attributes disappear before commit. */
+    private int deleteSessions(boolean expiredOnly, String id) throws SQLException {
+        int deleted = 0;
+        boolean committed = false;
+        try (Connection connection = dataSource.getConnection()) {
+            boolean autoCommit = connection.getAutoCommit();
+            boolean transactionEnded = true;
+            Throwable failure = null;
+            try {
+                if (autoCommit) connection.setAutoCommit(false);
+                transactionEnded = false;
+                try (PreparedStatement stmt = connection.prepareStatement(expiredOnly ? deleteExpiredSessionsQuery : deleteSessionQuery)) {
+                    if (expiredOnly) stmt.setLong(1, System.currentTimeMillis());
+                    else stmt.setString(1, id);
+                    deleted = stmt.executeUpdate();
+                }
+                // Without cascading FKs, bulk cleanup also removes previously orphaned rows.
+                try (PreparedStatement stmt = connection.prepareStatement(expiredOnly ? deleteOrphanAttributesQuery : deleteSessionAttributesQuery)) {
+                    if (!expiredOnly) stmt.setString(1, id);
+                    stmt.executeUpdate();
+                }
+                connection.commit();
+                transactionEnded = true;
+                committed = true;
+            } catch (SQLException | RuntimeException e) {
+                failure = e;
+                if (!transactionEnded) {
+                    try { connection.rollback(); transactionEnded = true; }
+                    catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
+                }
+                throw e;
+            } finally {
+                try {
+                    if (transactionEnded) restoreConnection(connection, null, autoCommit);
+                    else connection.abort(Runnable::run);
+                } catch (SQLException cleanupFailure) {
+                    reportCleanup(failure, cleanupFailure, "deletion connection state");
+                }
             }
         } catch (SQLException e) {
-            logger.error("SqlException:", e);
+            if (!committed) throw e;
+            reportCleanup(null, e, "committed deletion connection");
         }
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("Cleaned up " + deletedCount + " expired sessions");
-        }
+        return deleted;
     }
 
     public void updateSessionLastAccessTime(final String id) {
@@ -506,6 +544,7 @@ public class JdbcSessionRepository implements
              PreparedStatement stmt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
             stmt.setLong(1, lastAccessedTime);
             stmt.setString(2, id);
+            stmt.setLong(3, System.currentTimeMillis());
             stmt.executeUpdate();
         } catch (SQLException e) { logger.error("SqlException:", e); }
     }
@@ -526,8 +565,9 @@ public class JdbcSessionRepository implements
         this.deleteSessionQuery = getQuery(DELETE_SESSION_QUERY);
         this.listSessionsByPrincipalNameQuery =
                 getQuery(LIST_SESSIONS_BY_PRINCIPAL_NAME_QUERY);
-        this.deleteSessionsByExpiryTimeQuery =
-                getQuery(DELETE_SESSIONS_BY_EXPIRY_TIME_QUERY);
+        this.deleteExpiredSessionsQuery = getQuery(DELETE_EXPIRED_SESSIONS_QUERY);
+        this.deleteSessionAttributesQuery = getQuery(DELETE_SESSION_ATTRIBUTES_QUERY);
+        this.deleteOrphanAttributesQuery = getQuery(DELETE_ORPHAN_ATTRIBUTES_QUERY);
     }
 
     private DecodedAttribute deserialize(ResultSet rs, int budget) throws SQLException, SerializationFailedException {
