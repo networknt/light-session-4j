@@ -247,7 +247,7 @@ class JdbcSessionConnectionCleanupTest {
                     if (query.startsWith("UPDATE light_session SET LAST_ACCESS_TIME")) accessParameters.put((Integer) args[0], args[1]);
                     yield null;
                 }
-                case "close" -> null;
+                case "close", "setMaxRows" -> null;
                 case "setBlob" -> { blobBinds++; yield null; }
                 case "setBinaryStream" -> { streamBinds++; yield null; }
                 case "executeUpdate" -> {
@@ -263,6 +263,7 @@ class JdbcSessionConnectionCleanupTest {
             boolean[] next = {true};
             return proxy(ResultSet.class, (method, args) -> switch (method) {
                 case "next" -> { boolean result = next[0]; next[0] = false; yield result; }
+                case "getString" -> "session";
                 case "getLong" -> args[0].equals("SESSION_BYTES") ? aggregateBytes : 1L;
                 case "getBlob" -> proxy(Blob.class, (m, a) -> switch (m) {
                     case "length" -> { blobLengths++; yield 1L; }

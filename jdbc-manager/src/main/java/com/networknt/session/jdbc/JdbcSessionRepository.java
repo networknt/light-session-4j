@@ -83,7 +83,7 @@ public class JdbcSessionRepository implements
 
     private static final String UPDATE_SESSION_QUERY =
             "UPDATE light_session SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = NULL, PRINCIPAL_NAME = ? " +
-                    "WHERE SESSION_ID = ?";
+                    "WHERE SESSION_ID = ? AND " + LIVE_SESSION_PREDICATE;
 
     private static final String UPDATE_SESSION_ACCESS_TIME_QUERY =
             "UPDATE light_session SET LAST_ACCESS_TIME = ?, EXPIRY_TIME = NULL WHERE SESSION_ID = ? AND " + LIVE_SESSION_PREDICATE;
@@ -93,7 +93,7 @@ public class JdbcSessionRepository implements
                     "WHERE SESSION_ID = ? " +
                     "AND ATTRIBUTE_NAME = ?";
 
-    private static final String DELETE_SESSION_ATTRIBUTE_QUERY =
+    private static final String DELETE_SINGLE_ATTRIBUTE_QUERY =
             "DELETE FROM light_session_attributes " +
                     "WHERE SESSION_ID = ? " +
                     "AND ATTRIBUTE_NAME = ?";
@@ -108,16 +108,19 @@ public class JdbcSessionRepository implements
                     "LEFT OUTER JOIN light_session_attributes SA ON S.PRIMARY_ID = SA.SESSION_PRIMARY_ID " +
                     "WHERE S.PRINCIPAL_NAME = ?";
 
-    private static final String DELETE_EXPIRED_SESSIONS_QUERY =
-            "DELETE FROM light_session " +
-                    "WHERE NOT " + LIVE_SESSION_PREDICATE;
+    private static final int CLEANUP_BATCH_SIZE = 128;
 
-    private static final String DELETE_SESSION_ATTRIBUTES_QUERY =
+    private static final String SELECT_EXPIRED_IDS_QUERY =
+            "SELECT SESSION_ID FROM light_session WHERE NOT " + LIVE_SESSION_PREDICATE + " ORDER BY SESSION_ID";
+
+    private static final String SELECT_EXPIRED_IDS_AFTER_QUERY =
+            "SELECT SESSION_ID FROM light_session WHERE SESSION_ID > ? AND NOT " + LIVE_SESSION_PREDICATE + " ORDER BY SESSION_ID";
+
+    private static final String DELETE_EXPIRED_PARENT_QUERY =
+            "DELETE FROM light_session WHERE SESSION_ID = ? AND NOT " + LIVE_SESSION_PREDICATE;
+
+    private static final String DELETE_ATTRIBUTES_FOR_SESSION_QUERY =
             "DELETE FROM light_session_attributes WHERE SESSION_ID = ?";
-
-    private static final String DELETE_ORPHAN_ATTRIBUTES_QUERY =
-            "DELETE FROM light_session_attributes WHERE NOT EXISTS " +
-                    "(SELECT 1 FROM light_session S WHERE S.SESSION_ID = light_session_attributes.SESSION_ID)";
 
     private static final Logger logger = LoggerFactory.getLogger(JdbcSessionRepository.class);
 
@@ -130,12 +133,13 @@ public class JdbcSessionRepository implements
     private String getListingSessionQuery;
     private String updateSessionQuery;
     private String updateSessionAttributeQuery;
-    private String deleteSessionAttributeQuery;
+    private String deleteSingleAttributeQuery;
     private String deleteSessionQuery;
     private String listSessionsByPrincipalNameQuery;
-    private String deleteExpiredSessionsQuery;
-    private String deleteSessionAttributesQuery;
-    private String deleteOrphanAttributesQuery;
+    private String selectExpiredIdsQuery;
+    private String selectExpiredIdsAfterQuery;
+    private String deleteExpiredParentQuery;
+    private String deleteAttributesForSessionQuery;
 
     private Integer defaultMaxInactiveInterval = 30 * 60;
 
@@ -297,55 +301,65 @@ public class JdbcSessionRepository implements
             throw new IllegalStateException("Failed to serialize JDBC session attributes; pending changes retained", e);
         }
 
-        boolean committed = false;
-        try (Connection connection = dataSource.getConnection()) {
-            boolean validate = !session.isNew() && !attributes.isEmpty();
-            Integer isolationToRestore = null;
-            boolean autoCommitToRestore = connection.getAutoCommit();
-            Throwable failure = null;
-            boolean transactionStarted = false;
-            boolean transactionEnded = true;
-            try {
-                // The statement after acquiring the parent lock must see the previous writer.
-                if (validate) {
-                    int isolation = connection.getTransactionIsolation();
-                    if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
-                        isolationToRestore = isolation;
-                        connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-                    }
-                }
-                if (autoCommitToRestore) connection.setAutoCommit(false);
-                transactionStarted = true;
-                transactionEnded = false;
+        boolean validate = !session.isNew() && !attributes.isEmpty();
+        try {
+            transact(validate ? Connection.TRANSACTION_READ_COMMITTED : null, connection -> {
                 writeSession(connection, session, attributes);
                 if (validate) validateStoredBudget(connection, session.getId());
+                return null;
+            });
+            session.clearChangeFlags();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to persist JDBC session; pending changes retained", e);
+        }
+    }
+
+    @FunctionalInterface
+    private interface SqlTransaction<T> { T execute(Connection connection) throws SQLException; }
+
+    /** Owns transaction outcome and borrowed-connection state for every multi-statement write. */
+    private <T> T transact(Integer requiredIsolation, SqlTransaction<T> work) throws SQLException {
+        boolean committed = false;
+        T result = null;
+        try (Connection connection = dataSource.getConnection()) {
+            Integer isolationToRestore = null;
+            boolean autoCommit = connection.getAutoCommit();
+            boolean transactionEnded = true;
+            Throwable failure = null;
+            try {
+                if (requiredIsolation != null) {
+                    int isolation = connection.getTransactionIsolation();
+                    if (isolation != requiredIsolation) {
+                        isolationToRestore = isolation;
+                        connection.setTransactionIsolation(requiredIsolation);
+                    }
+                }
+                if (autoCommit) connection.setAutoCommit(false);
+                transactionEnded = false;
+                result = work.execute(connection);
                 connection.commit();
                 transactionEnded = true;
                 committed = true;
-                session.clearChangeFlags();
-            } catch (SQLException | RuntimeException e) {
+            } catch (SQLException | RuntimeException | Error e) {
                 failure = e;
-                if (transactionStarted) {
+                if (!transactionEnded) {
                     try { connection.rollback(); transactionEnded = true; }
                     catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
                 }
                 throw e;
             } finally {
                 try {
-                    if (transactionEnded) restoreConnection(connection, isolationToRestore, autoCommitToRestore);
-                    // Changing isolation/autocommit with an unresolved transaction could commit it.
+                    if (transactionEnded) restoreConnection(connection, isolationToRestore, autoCommit);
                     else connection.abort(Runnable::run);
                 } catch (SQLException cleanupFailure) {
-                    reportCleanup(failure, cleanupFailure, "session connection state");
+                    reportCleanup(failure, cleanupFailure, "transaction connection state");
                 }
             }
         } catch (SQLException e) {
-            if (committed) {
-                reportCleanup(null, e, "committed session connection");
-            } else {
-                throw new IllegalStateException("Failed to persist JDBC session; pending changes retained", e);
-            }
+            if (!committed) throw e;
+            reportCleanup(null, e, "committed transaction connection");
         }
+        return result;
     }
 
     private void writeSession(Connection connection, JdbcSession session, Map<String, byte[]> attributes) throws SQLException {
@@ -362,14 +376,15 @@ public class JdbcSessionRepository implements
                 stmt.setInt(3, session.getMaxInactiveInterval());
                 stmt.setString(4, session.getPrincipalName());
                 stmt.setString(5, session.getId());
+                stmt.setLong(6, System.currentTimeMillis());
             }
-            if (stmt.executeUpdate() != 1) throw new SQLException("JDBC session row was not written");
+            if (stmt.executeUpdate() != 1) throw new SQLException("JDBC session row is expired or missing; pending changes retained");
         }
         for (Map.Entry<String, byte[]> entry : attributes.entrySet()) {
             String name = entry.getKey();
             byte[] bytes = entry.getValue();
             if (bytes == null) {
-                try (PreparedStatement stmt = connection.prepareStatement(deleteSessionAttributeQuery)) {
+                try (PreparedStatement stmt = connection.prepareStatement(deleteSingleAttributeQuery)) {
                     stmt.setString(1, session.getId()); stmt.setString(2, name); stmt.executeUpdate();
                 }
             } else if (isNew) {
@@ -478,61 +493,63 @@ public class JdbcSessionRepository implements
 
     @Override
     public void deleteById(final String id) {
-        try { deleteSessions(false, id); }
-        catch (SQLException e) { logger.error("SqlException:", e); }
+        try {
+            transact(null, connection -> {
+                try (PreparedStatement parent = connection.prepareStatement(deleteSessionQuery)) {
+                    parent.setString(1, id);
+                    if (parent.executeUpdate() == 1) deleteAttributesForSession(connection, id);
+                }
+                return null;
+            });
+        } catch (SQLException e) { logger.error("SqlException:", e); }
     }
 
+    private void deleteAttributesForSession(Connection connection, String id) throws SQLException {
+        try (PreparedStatement attributes = connection.prepareStatement(deleteAttributesForSessionQuery)) {
+            attributes.setString(1, id); attributes.executeUpdate();
+        }
+    }
+
+    private record CleanupPage(String lastId, int deleted) { }
+
     public void cleanUpExpiredSessions() {
+        long cutoff = System.currentTimeMillis();
+        String after = null;
+        int deleted = 0;
         try {
-            int deleted = deleteSessions(true, null);
+            do {
+                String previous = after;
+                CleanupPage page = transact(null, connection -> deleteExpiredPage(connection, previous, cutoff));
+                deleted += page.deleted();
+                after = page.lastId();
+            } while (after != null);
             logger.debug("Cleaned up {} expired sessions", deleted);
         } catch (SQLException e) { logger.error("SqlException:", e); }
     }
 
-    /** Parent-first deletion shares save's lock order; attributes disappear before commit. */
-    private int deleteSessions(boolean expiredOnly, String id) throws SQLException {
+    private CleanupPage deleteExpiredPage(Connection connection, String after, long cutoff) throws SQLException {
+        List<String> ids = readResource(connection.prepareStatement(after == null ? selectExpiredIdsQuery : selectExpiredIdsAfterQuery), stmt -> {
+            int parameter = 1;
+            if (after != null) stmt.setString(parameter++, after);
+            stmt.setLong(parameter, cutoff); stmt.setMaxRows(CLEANUP_BATCH_SIZE);
+            return readResource(stmt.executeQuery(), rows -> {
+                List<String> selected = new ArrayList<>();
+                while (rows.next()) selected.add(rows.getString("SESSION_ID"));
+                return selected;
+            }, "cleanup ID cursor");
+        }, "cleanup ID statement");
+        if (ids.isEmpty()) return new CleanupPage(null, 0);
         int deleted = 0;
-        boolean committed = false;
-        try (Connection connection = dataSource.getConnection()) {
-            boolean autoCommit = connection.getAutoCommit();
-            boolean transactionEnded = true;
-            Throwable failure = null;
-            try {
-                if (autoCommit) connection.setAutoCommit(false);
-                transactionEnded = false;
-                try (PreparedStatement stmt = connection.prepareStatement(expiredOnly ? deleteExpiredSessionsQuery : deleteSessionQuery)) {
-                    if (expiredOnly) stmt.setLong(1, System.currentTimeMillis());
-                    else stmt.setString(1, id);
-                    deleted = stmt.executeUpdate();
-                }
-                // Without cascading FKs, bulk cleanup also removes previously orphaned rows.
-                try (PreparedStatement stmt = connection.prepareStatement(expiredOnly ? deleteOrphanAttributesQuery : deleteSessionAttributesQuery)) {
-                    if (!expiredOnly) stmt.setString(1, id);
-                    stmt.executeUpdate();
-                }
-                connection.commit();
-                transactionEnded = true;
-                committed = true;
-            } catch (SQLException | RuntimeException e) {
-                failure = e;
-                if (!transactionEnded) {
-                    try { connection.rollback(); transactionEnded = true; }
-                    catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
-                }
-                throw e;
-            } finally {
-                try {
-                    if (transactionEnded) restoreConnection(connection, null, autoCommit);
-                    else connection.abort(Runnable::run);
-                } catch (SQLException cleanupFailure) {
-                    reportCleanup(failure, cleanupFailure, "deletion connection state");
-                }
+        // Only successful parent deletes authorize a keyed child delete in this transaction.
+        try (PreparedStatement parent = connection.prepareStatement(deleteExpiredParentQuery);
+             PreparedStatement attributes = connection.prepareStatement(deleteAttributesForSessionQuery)) {
+            for (String id : ids) {
+                parent.setString(1, id); parent.setLong(2, cutoff);
+                if (parent.executeUpdate() != 1) continue;
+                attributes.setString(1, id); attributes.executeUpdate(); deleted++;
             }
-        } catch (SQLException e) {
-            if (!committed) throw e;
-            reportCleanup(null, e, "committed deletion connection");
         }
-        return deleted;
+        return new CleanupPage(ids.getLast(), deleted);
     }
 
     public void updateSessionLastAccessTime(final String id) {
@@ -540,13 +557,18 @@ public class JdbcSessionRepository implements
     }
 
     private void updateSessionAccess(String id, long lastAccessedTime) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement stmt = connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY)) {
-            stmt.setLong(1, lastAccessedTime);
-            stmt.setString(2, id);
-            stmt.setLong(3, System.currentTimeMillis());
-            stmt.executeUpdate();
-        } catch (SQLException e) { logger.error("SqlException:", e); }
+        try {
+            readResource(dataSource.getConnection(), connection ->
+                    readResource(connection.prepareStatement(UPDATE_SESSION_ACCESS_TIME_QUERY), stmt -> {
+                        stmt.setLong(1, lastAccessedTime); stmt.setString(2, id);
+                        stmt.setLong(3, System.currentTimeMillis());
+                        if (stmt.executeUpdate() != 1)
+                            throw new IllegalStateException("JDBC session access refused: stored session is expired or missing");
+                        return null;
+                    }, "access statement"), "access connection");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to refresh JDBC session; in-memory access time unchanged", e);
+        }
     }
 
     private String getQuery(String base) {
@@ -561,13 +583,14 @@ public class JdbcSessionRepository implements
         this.getListingSessionQuery = getQuery(GET_LISTING_SESSION_QUERY);
         this.updateSessionQuery = getQuery(UPDATE_SESSION_QUERY);
         this.updateSessionAttributeQuery = getQuery(UPDATE_SESSION_ATTRIBUTE_QUERY);
-        this.deleteSessionAttributeQuery = getQuery(DELETE_SESSION_ATTRIBUTE_QUERY);
+        this.deleteSingleAttributeQuery = getQuery(DELETE_SINGLE_ATTRIBUTE_QUERY);
         this.deleteSessionQuery = getQuery(DELETE_SESSION_QUERY);
         this.listSessionsByPrincipalNameQuery =
                 getQuery(LIST_SESSIONS_BY_PRINCIPAL_NAME_QUERY);
-        this.deleteExpiredSessionsQuery = getQuery(DELETE_EXPIRED_SESSIONS_QUERY);
-        this.deleteSessionAttributesQuery = getQuery(DELETE_SESSION_ATTRIBUTES_QUERY);
-        this.deleteOrphanAttributesQuery = getQuery(DELETE_ORPHAN_ATTRIBUTES_QUERY);
+        this.selectExpiredIdsQuery = getQuery(SELECT_EXPIRED_IDS_QUERY);
+        this.selectExpiredIdsAfterQuery = getQuery(SELECT_EXPIRED_IDS_AFTER_QUERY);
+        this.deleteExpiredParentQuery = getQuery(DELETE_EXPIRED_PARENT_QUERY);
+        this.deleteAttributesForSessionQuery = getQuery(DELETE_ATTRIBUTES_FOR_SESSION_QUERY);
     }
 
     private DecodedAttribute deserialize(ResultSet rs, int budget) throws SQLException, SerializationFailedException {
@@ -718,10 +741,6 @@ public class JdbcSessionRepository implements
         }
 
 
-        public long getExpiryTime() {
-            return getMaxInactiveInterval() < 0 ? Long.MAX_VALUE : getLastAccessedTime() + getMaxInactiveInterval() * 1000L;
-        }
-
         @Override
         public String getId() {
             return this.delegate.getId();
@@ -769,9 +788,9 @@ public class JdbcSessionRepository implements
 
         @Override
         public void setLastAccessedTime(long lastAccessedTime) {
+            if (!this.isNew) JdbcSessionRepository.this.updateSessionAccess(this.getId(), lastAccessedTime);
             this.delegate.setLastAccessedTime(lastAccessedTime);
             this.changed = true;
-            JdbcSessionRepository.this.updateSessionAccess(this.getId(), lastAccessedTime);
         }
 
         @Override
