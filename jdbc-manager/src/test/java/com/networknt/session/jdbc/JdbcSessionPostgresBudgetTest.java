@@ -198,15 +198,17 @@ class JdbcSessionPostgresBudgetTest {
                 check.setString(1, session.getId());
                 try (ResultSet rows = check.executeQuery()) { assertTrue(rows.next()); assertEquals(60, rows.getInt(1)); }
             }
-            repo.save(stale);
-            assertTrue(repo.getSessions().containsKey(session.getId()));
+            assertThrows(IllegalStateException.class, () -> repo.save(stale));
+            assertFalse(repo.getSessions().containsKey(session.getId()));
             try (PreparedStatement stmt = fixture.admin().prepareStatement("UPDATE light_session SET MAX_INACTIVE_INTERVAL = NULL WHERE SESSION_ID = ?")) {
                 stmt.setString(1, session.getId()); stmt.executeUpdate();
             }
-            repo.updateSessionLastAccessTime(session.getId());
+            assertThrows(IllegalStateException.class, () -> repo.updateSessionLastAccessTime(session.getId()));
             assertFalse(repo.getSessions().containsKey(session.getId())); assertNull(repo.findById(session.getId()));
-            assertDoesNotThrow(() -> stale.setLastAccessedTime(System.currentTimeMillis()));
-            assertDoesNotThrow(() -> repo.updateSessionLastAccessTime(session.getId()));
+            long before = stale.getLastAccessedTime();
+            assertThrows(IllegalStateException.class, () -> stale.setLastAccessedTime(System.currentTimeMillis()));
+            assertEquals(before, stale.getLastAccessedTime());
+            assertThrows(IllegalStateException.class, () -> repo.updateSessionLastAccessTime(session.getId()));
             assertNull(repo.findById(session.getId()));
         });
     }
@@ -221,7 +223,12 @@ class JdbcSessionPostgresBudgetTest {
                     stmt.setLong(1, oldAccess); if (timeout == null) stmt.setNull(2, Types.INTEGER); else stmt.setInt(2, timeout);
                     stmt.setString(3, session.getId()); stmt.executeUpdate();
                 }
-                repo.updateSessionLastAccessTime(session.getId()); late.setMaxInactiveInterval(-1); late.setLastAccessedTime(Long.MAX_VALUE);
+                long before = late.getLastAccessedTime();
+                assertThrows(IllegalStateException.class, () -> repo.updateSessionLastAccessTime(session.getId()));
+                assertThrows(IllegalStateException.class, () -> late.setLastAccessedTime(Long.MAX_VALUE));
+                assertEquals(before, late.getLastAccessedTime()); assertFalse(late.isChanged());
+                late.setMaxInactiveInterval(-1);
+                assertThrows(IllegalStateException.class, () -> repo.save(late));
                 try (PreparedStatement stmt = fixture.admin().prepareStatement("SELECT LAST_ACCESS_TIME FROM light_session WHERE SESSION_ID = ?")) {
                     stmt.setString(1, session.getId()); try (ResultSet rows = stmt.executeQuery()) { assertTrue(rows.next()); assertEquals(oldAccess, rows.getLong(1)); }
                 }
@@ -231,11 +238,11 @@ class JdbcSessionPostgresBudgetTest {
             }
             repo.cleanUpExpiredSessions(); assertEquals(Set.of(healthy.getId()), repo.getSessions().keySet());
             try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
-                assertTrue(rows.next()); assertEquals(1, rows.getInt(1));
+                assertTrue(rows.next()); assertEquals(2, rows.getInt(1));
             }
             repo.deleteById(healthy.getId());
             try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
-                assertTrue(rows.next()); assertEquals(0, rows.getInt(1));
+                assertTrue(rows.next()); assertEquals(1, rows.getInt(1));
             }
         });
     }
@@ -293,6 +300,42 @@ class JdbcSessionPostgresBudgetTest {
                     assertTrue(rows.next()); assertEquals(0, rows.getInt(1));
                 }
                 assertNull(repo.findById(session.getId()));
+            }
+        });
+    }
+
+    @Test void cleanupCannotTouchAConcurrentNewSessionOrHistoricalOrphan() throws Exception {
+        withSchema("BYTEA", fixture -> {
+            var repo = new JdbcSessionRepository(fixture.source()); var expired = repo.createSession();
+            expired.setAttribute("a", "expired"); expired.setMaxInactiveInterval(0); repo.save(expired);
+            try (PreparedStatement stmt = fixture.admin().prepareStatement("INSERT INTO light_session_attributes VALUES ('historical-orphan', 'a', ?)")) {
+                stmt.setBytes(1, new ValueBytesConverter().serializer("old")); stmt.executeUpdate();
+            }
+            var created = new java.util.concurrent.atomic.AtomicReference<String>();
+            DataSource interleaved = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class}, (p, m, a) -> {
+                Connection connection = (Connection) invokeJdbc(fixture.source(), m, a);
+                return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class}, (cp, cm, ca) -> {
+                    Object value = invokeJdbc(connection, cm, ca);
+                    if (!cm.getName().equals("prepareStatement")) return value;
+                    String query = ca[0].toString();
+                    if (query.startsWith("DELETE FROM light_session_attributes"))
+                        assertEquals("DELETE FROM light_session_attributes WHERE SESSION_ID = ?", query);
+                    if (!query.startsWith("DELETE FROM light_session ")) return value;
+                    PreparedStatement statement = (PreparedStatement) value;
+                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class}, (sp, sm, sa) -> {
+                        Object result = invokeJdbc(statement, sm, sa);
+                        if (sm.getName().equals("executeUpdate") && created.get() == null) {
+                            var fresh = repo.createSession(); fresh.setAttribute("a", "fresh"); created.set(fresh.getId());
+                        }
+                        return result;
+                    });
+                });
+            });
+            new JdbcSessionRepository(interleaved).cleanUpExpiredSessions();
+            assertNotNull(created.get()); assertEquals("fresh", repo.findById(created.get()).getAttribute("a"));
+            assertNull(repo.findById(expired.getId()));
+            try (Statement stmt = fixture.admin().createStatement(); ResultSet rows = stmt.executeQuery("SELECT COUNT(*) FROM light_session_attributes")) {
+                assertTrue(rows.next()); assertEquals(2, rows.getInt(1), "New session and historical orphan must both remain");
             }
         });
     }

@@ -209,8 +209,13 @@ Access updates LAST_ACCESS_TIME only while the stored row is still live, using t
 same predicate and the wall-clock time of the update attempt. Both the public ID-only
 method and a late setLastAccessedTime cannot revive an already expired row; a future
 requested access timestamp or pending timeout change does not bypass that check.
-Pending timeout edits affect stored liveness when save() writes MAX_INACTIVE_INTERVAL.
-There is one UPDATE per access, with no timeout snapshot, lookup or retry loop.
+A refused refresh throws IllegalStateException. setLastAccessedTime applies the new
+in-memory timestamp and dirty flag only after that UPDATE succeeds; existing pending
+edits are preserved on refusal. save() also requires the stored row to be live, so a
+stale object or later setAttribute cannot resurrect an expired session. SQL save
+failures retain pending edits. Pending timeout edits affect stored liveness only when
+a save of a still-live row commits. There is one UPDATE per access, with no timeout
+snapshot, lookup or retry loop.
 
 EXPIRY_TIME is a reserved legacy column. New sessions, full saves and successful
 access updates explicitly write NULL, rather than a plausible but stale timestamp.
@@ -220,12 +225,22 @@ as an expiry signal. Older binaries using it for their own listing/cleanup must 
 upgraded before those readers/cleanup jobs are used. No expiry data migration is
 required by the corrected repository.
 
-Delete-by-ID removes the parent and its attributes in one transaction. Expiry cleanup
-also deletes parents first and sweeps orphaned attributes before committing, including
-orphans left by previous versions. A child-delete failure rolls back parent deletion.
-This uses the same parent-first lock order as repository saves and does not require a
-schema/cascade migration for the shipped schemas. Direct writers outside that locking protocol remain outside
-the guarantee.
+Save and deletion share one transaction handler for commit, rollback/abort and
+borrowed-connection restoration. Delete-by-ID removes a parent and its attributes in
+one transaction. Expiry cleanup selects primary-key ID pages of at most 128 candidates,
+rechecks expiry on each conditional parent DELETE, and deletes attributes only for IDs
+whose parent it actually deleted in that transaction. It commits each page; a failed
+page rolls back while earlier committed pages remain complete. A later cleanup call
+can retry remaining rows. Selection cursors close before deletes, with no MARS need.
+
+Cleanup does no attribute work for an empty page and performs only keyed child deletes
+for successful parent deletes. It issues no table-wide attribute sweep or orphan
+anti-join and does not delete historical/unrelated orphans. Those require separate,
+explicit operator maintenance; they are not safely inferred from a routine cleanup
+transaction's snapshot. Parent-first locking matches repository saves and prevents
+waiting writers from inserting new attributes after deletion. Direct writers outside
+that protocol remain outside the guarantee. The shipped schemas need no cascade
+migration for scoped deletion.
 
 ### Before enabling corrected cleanup
 
@@ -246,8 +261,9 @@ WHERE MAX_INACTIVE_INTERVAL = 0;
 ```
 
 If these rows need investigation or application-specific recovery, keep cleanup
-scheduled off until that work is complete. Cleanup also removes existing attribute
-orphans; inventory their count with:
+scheduled off until that work is complete. Historical attribute orphans are left
+untouched by routine cleanup. The following read-only inventory can guide a separate
+operator-owned maintenance task; it is never executed by the repository:
 
 ```sql
 SELECT COUNT(*) FROM light_session_attributes A
