@@ -516,12 +516,12 @@ class JdbcSessionAggregateLimitTest {
         });
         try (Connection connection = failing.getConnection()) {
             connection.setAutoCommit(false);
-            assertThrows(SQLException.class, () -> JdbcSessionOrphanCleanup.removePage(connection, 2));
+            assertThrows(SQLException.class, () -> JdbcSessionOrphanCleanup.removePage(connection, 2, null).removed());
         }
         assertEquals(2, rowCount("light_session_attributes", "rollback-orphan"));
         try (Connection connection = database.getConnection()) {
             connection.setAutoCommit(false);
-            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2));
+            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2, null).removed());
         }
     }
 
@@ -532,13 +532,13 @@ class JdbcSessionAggregateLimitTest {
         attribute("another-orphan", "a", "third");
         try (Connection connection = database.getConnection()) {
             connection.setAutoCommit(false);
-            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2));
+            assertEquals(2, JdbcSessionOrphanCleanup.removePage(connection, 2, null).removed());
         }
         // A fresh connection resumes from committed deletions, without a checkpoint file.
         try (Connection connection = database.getConnection()) {
             connection.setAutoCommit(false);
-            assertEquals(1, JdbcSessionOrphanCleanup.removePage(connection, 2));
-            assertEquals(0, JdbcSessionOrphanCleanup.removePage(connection, 2));
+            assertEquals(1, JdbcSessionOrphanCleanup.removePage(connection, 2, null).removed());
+            assertEquals(0, JdbcSessionOrphanCleanup.removePage(connection, 2, null).removed());
         }
         assertEquals(1, rowCount("light_session_attributes", healthy.getId()));
         assertEquals(0, rowCount("light_session_attributes", "historical-orphan"));

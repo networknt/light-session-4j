@@ -93,13 +93,11 @@ class JdbcSessionMysqlContractTest {
             try (Statement stmt = admin.createStatement()) {
                 stmt.execute("INSERT INTO light_session_attributes VALUES ('orphan', 'a', X'01'), ('orphan', 'b', X'02'), ('another', 'a', X'03')");
             }
-            try (Connection maintenance = source.getConnection()) {
-                maintenance.setAutoCommit(false); assertEquals(2, JdbcSessionOrphanCleanup.removePage(maintenance, 2));
-            }
-            try (Connection maintenance = source.getConnection()) {
-                maintenance.setAutoCommit(false); assertEquals(1, JdbcSessionOrphanCleanup.removePage(maintenance, 2));
-                assertEquals(0, JdbcSessionOrphanCleanup.removePage(maintenance, 2));
-            }
+            var result = JdbcSessionOrphanCleanupTest.command(java.util.Map.of("JDBC_MAINTENANCE_URL", System.getProperty("jdbcMysqlUrl") + "&useAffectedRows=true"), "--writers-stopped", "2");
+            assertEquals(0, result.exit(), result.output());
+            assertEquals(java.util.List.of("Committed orphan attributes: 2", "Committed orphan attributes: 3", "Completed orphan cleanup; removed: 3"), result.output().lines().toList());
+            var rerun = JdbcSessionOrphanCleanupTest.command(java.util.Map.of("JDBC_MAINTENANCE_URL", System.getProperty("jdbcMysqlUrl")), "--writers-stopped", "2");
+            assertEquals(0, rerun.exit(), rerun.output()); assertTrue(rerun.output().contains("removed: 0"));
             assertEquals("keep", repo.findById(valid.getId()).getAttribute("a"));
         });
     }
