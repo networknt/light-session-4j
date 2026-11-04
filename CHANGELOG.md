@@ -1,5 +1,19 @@
 # Change Log
 
+## [2.5.0](https://github.com/networknt/light-session-4j/tree/2.5.0) (2026-11-04)
+
+**Commits:**
+
+- upgrade to version 2.5.0 before release in 2.x branch ([9f6b3af](https://github.com/networknt/light-session-4j/commit/9f6b3af89b5603df43334d4ec55c7ad78d748e8d)) (by Steve Hu)
+- \[2.x\] Bound aggregate JDBC session and listing resources (#72) ([996e002](https://github.com/networknt/light-session-4j/commit/996e002215f327952747bbfd3e1778cb32561411)) (by Steve Hu)
+- upgrade to version 2.5.0-SNAPSHOT after release in 2.x branch ([1cb251c](https://github.com/networknt/light-session-4j/commit/1cb251cbcb12133980afe86bb4de3ffc7c7e84c7)) (by Steve Hu)
+- upgrade jackson to 2.22.4 from 2.22.3 ([1266983](https://github.com/networknt/light-session-4j/commit/12669832a2ef36d6852da2b9528744b20f67b370)) (by Steve Hu)
+- upgrade logback to 1.6.6 from 1.6.5 ([4e200db](https://github.com/networknt/light-session-4j/commit/4e200db38a99e6c75e4e7f0b3754dc8b1a7c9a15)) (by Steve Hu)
+- fix: enforce hard JDBC session attribute byte limits on 2.x (#69) ([852eaf3](https://github.com/networknt/light-session-4j/commit/852eaf3f7de51100121e2f85bb195323c5f46709)) (by Steve Hu)
+- upgrade maven-version to 2.23.0 from 2.22.0 ([1f82d52](https://github.com/networknt/light-session-4j/commit/1f82d527b8af38d75bbb6e5a832685ed90dcaaf3)) (by Steve Hu)
+- upgrade caffeine to 3.3.1 from 3.3.0 ([e4e13f3](https://github.com/networknt/light-session-4j/commit/e4e13f34946500f2e43441802091e4f3e7ee79ea)) (by Steve Hu)
+- upgrade to version 2.4.2-SNAPSHOT after release in master branch ([31a0f51](https://github.com/networknt/light-session-4j/commit/31a0f51443fe49dbb084613d1896d9bedadf8992)) (by Steve Hu)
+
 ## [2.4.1](https://github.com/networknt/light-session-4j/tree/2.4.1) (2026-10-11)
 
 **Commits:**
