@@ -1,5 +1,16 @@
 # Change Log
 
+## [2.5.1](https://github.com/networknt/light-session-4j/tree/2.5.1) (2026-11-21)
+
+**Commits:**
+
+- upgrade to version 2.5.1 before release in 2.x branch ([3755503](https://github.com/networknt/light-session-4j/commit/37555032d6b6a246dbfdc6073e3c4c678cba7e5d)) (by Steve Hu)
+- upgrade logback to 1.6.8 from 1.6.7 ([c834947](https://github.com/networknt/light-session-4j/commit/c83494749496244b40a7600e6f5cea9a119ecc4d)) (by Steve Hu)
+- upgrade logback to 1.6.7 from 1.6.6 ([db96dc5](https://github.com/networknt/light-session-4j/commit/db96dc5658d7155826e5526960ebd1a0d31a0d85)) (by Steve Hu)
+- upgrade maven-version to 2.25.2 from 2.23.0 ([0ada1c3](https://github.com/networknt/light-session-4j/commit/0ada1c3933da7413763e4c5fd78c86739a2d41d5)) (by Steve Hu)
+- upgrade maven-surefire to 3.6.1 from 3.6.0 ([ffdd2ca](https://github.com/networknt/light-session-4j/commit/ffdd2caaffffe59acee2518c1c39029bf9d4a45e)) (by Steve Hu)
+- upgrade to version 2.5.1-SNAPSHOT after release in 2.x branch ([9efeea3](https://github.com/networknt/light-session-4j/commit/9efeea32687fc7df234193f7a6cf4992a5c10800)) (by Steve Hu)
+
 ## [2.5.0](https://github.com/networknt/light-session-4j/tree/2.5.0) (2026-11-04)
 
 **Commits:**
